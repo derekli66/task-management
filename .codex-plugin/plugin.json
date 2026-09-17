@@ -1,6 +1,6 @@
 {
   "name": "task-management",
-  "version": "0.1.0+codex.20260917155040",
+  "version": "0.1.0+codex.20260917155251",
   "description": "Persistent workspace-scoped local tasks with SQLite and four MCP tools",
   "author": {
     "name": "Derek"
