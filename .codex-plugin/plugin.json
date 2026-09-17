@@ -1,0 +1,19 @@
+{
+  "name": "task-management",
+  "version": "0.1.0+codex.20260917155040",
+  "description": "Persistent workspace-scoped local tasks with SQLite and four MCP tools",
+  "author": {
+    "name": "Derek"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Task Management",
+    "shortDescription": "Manage persistent local project tasks.",
+    "longDescription": "Create, list, inspect and update workspace-scoped tasks with dependency checks, revision conflicts and durable history.",
+    "developerName": "Derek",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "List the unfinished tasks for this workspace."
+  },
+  "mcpServers": "./.mcp.json"
+}

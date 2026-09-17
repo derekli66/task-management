@@ -1,0 +1,84 @@
+"""Real stdio transport tests: run from a directory unrelated to the plugin."""
+import asyncio
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+
+from mcp import Client
+from mcp.client.stdio import StdioServerParameters
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class MCPTest(unittest.TestCase):
+    def test_stdio_lifecycle_restart_and_machine_readable_errors(self):
+        for mode in ("legacy", "auto"):
+            with self.subTest(mode=mode):
+                asyncio.run(asyncio.wait_for(self.lifecycle(mode), timeout=25))
+
+    async def lifecycle(self, mode):
+        with tempfile.TemporaryDirectory() as cwd:
+            workspace = str(Path(cwd).resolve())
+            other = Path(cwd) / "other"
+            other.mkdir()
+            params = StdioServerParameters(command=sys.executable,
+                args=[str(ROOT / "task_management/server.py")], cwd=cwd,
+                env={**os.environ, "TASK_MANAGEMENT_DB": str(Path(cwd) / "tasks.sqlite3")})
+            async with Client(params, mode=mode) as client:
+                listing = await client.list_tools()
+                self.assertEqual({t.name for t in listing.tools},
+                    {"task_create", "task_list", "task_get", "task_update"})
+                async def call(name, **args):
+                    result = await client.call_tool(name, {"workspace": workspace, **args})
+                    self.assertFalse(result.is_error, str(result))
+                    self.assertEqual(json.loads(result.content[0].text), result.structured_content)
+                    return result.structured_content
+                task = (await call("task_create", request_id="retry-key", title="測試", done_when="All checks pass"))["task"]
+                retry = await call("task_create", request_id="retry-key", title="測試", done_when="All checks pass")
+                self.assertTrue(retry["reused"])
+                result = await client.call_tool("task_get", {"workspace":str(other), "task_id":task["id"]})
+                self.assertTrue(result.is_error)
+                self.assertEqual(result.structured_content["error"]["code"], "not_found")
+                for action, kwargs in (("start", {}), ("block", {"reason":"Wait"}),
+                        ("release", {"reason":"Resume"}), ("start", {}),
+                        ("complete", {"evidence":"Tests pass"}), ("reopen", {"reason":"Revise"}),
+                        ("cancel", {"reason":"Unneeded"})):
+                    task = (await call("task_update", task_id=task["id"], expected_revision=task["revision"],
+                                       actor="test", action=action, **kwargs))["task"]
+                self.assertEqual((await call("task_list"))["tasks"], [])
+                self.assertEqual(len((await call("task_list", status="all"))["tasks"]), 1)
+                result = await client.call_tool("task_update", {"workspace":workspace,
+                    "task_id":task["id"], "expected_revision":1, "actor":"test", "action":"reopen", "reason":"Old"})
+                self.assertTrue(result.is_error)
+                self.assertEqual(result.structured_content["error"]["code"], "revision_conflict")
+            async with Client(params, mode=mode) as fresh:
+                result = await fresh.call_tool("task_get", {"workspace":workspace, "task_id":task["id"]})
+                self.assertFalse(result.is_error)
+                self.assertEqual(result.structured_content["task"], task)
+                self.assertEqual(len(result.structured_content["events"]), 8)
+
+    def test_invalid_tool_arguments_cannot_change_state(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as cwd:
+                workspace = str(Path(cwd).resolve())
+                params = StdioServerParameters(command=sys.executable,
+                    args=[str(ROOT / "task_management/server.py")], cwd=cwd,
+                    env={**os.environ, "TASK_MANAGEMENT_DB": str(Path(cwd) / "tasks.sqlite3")})
+                async with Client(params) as client:
+                    result = await client.call_tool("task_create", dict(workspace=workspace,
+                        request_id="one", title="Task", done_when="Verified"))
+                    task = result.structured_content["task"]
+                    base = dict(workspace=workspace, task_id=task["id"], expected_revision=1, actor="test")
+                    for extra in ({"metadata":{"status":"completed"}},
+                                  {"action":"start", "expected_revision":True},
+                                  {"action":"start", "metadata":{"title":"Smuggled"}},
+                                  {"metadata":{"title":None}},
+                                  {"action":"start", "evidence":"Extraneous"}):
+                        result = await client.call_tool("task_update", {**base, **extra})
+                        self.assertTrue(result.is_error, str(result))
+                    result = await client.call_tool("task_get", dict(workspace=workspace, task_id=task["id"]))
+                    self.assertEqual(result.structured_content["task"]["revision"], 1)
+        asyncio.run(asyncio.wait_for(scenario(), timeout=20))
