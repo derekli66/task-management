@@ -30,6 +30,10 @@ New source checkouts also need a personal marketplace entry; use the Codex plugi
 
 Every call requires an absolute `workspace` directory. Use the Git worktree root, not a varying subdirectory. Symlink aliases resolve to the same workspace; distinct worktrees and clones are separate. Renaming/moving a workspace creates a new namespace; automatic relocation is not implemented.
 
+Every task has a human-readable `task_number` such as `"#1"`, `"#2"`, `"#3"` and the original UUID `id`. Numbers are immutable and increase across all workspaces in **one database**. Completed, cancelled or reopened tasks retain their numbers. A retry of the same creation request returns the original number. Separate databases/machines can have the same numbers; the UUID remains the durable internal identity. Restoring an older backup also restores its numbering state, so never merge references from divergent database histories as though they were one sequence.
+
+Pass either the UUID or the exact `"#N"` string as `task_id` to `task_get` and `task_update`. Workspace checks and `expected_revision` still apply. Numbers are positive ASCII integers without leading zeros, up to SQLite's signed 64-bit limit. They are not editable metadata. Dependency arrays and error-detail task IDs remain UUIDs: look up `#N` first and use its returned `id` for dependencies. Listing/pagination order is unchanged (creation timestamp, then UUID), not numeric order.
+
 | Tool | Main fields |
 |---|---|
 | task_create | workspace, request_id, title, done_when; optional description, priority, dependencies, actor |
@@ -62,7 +66,11 @@ Errors set MCP `isError` and domain errors include structured `error.code`, `mes
 
 Default database: `~/.local/share/task-management/tasks.sqlite3`. `TASK_MANAGEMENT_DB` may select a different absolute path when launching the server (used by tests). No network service or background scheduler is started. Database storage is local; returned task text enters the Codex conversation.
 
-The database is outside both the source checkout and plugin cache. Uninstall/reinstall does not remove it. Schema version 1 is accepted; unknown versions and nonempty unversioned databases are rejected without reset. Every operation checks the schema version. No schema migration is included. Use a local disk, not a network-share SQLite WAL database. Back up using SQLite's backup API, or shut down all writers and checkpoint before a filesystem backup; copying just the DB while WAL writers are running is insufficient.
+The database is outside both the source checkout and plugin cache. Uninstall/reinstall does not remove it. New databases use schema 2. On first open, schema 1 upgrades atomically after creating a private SQLite backup beside the database named `<database>.schema1.<UTC timestamp>.<unique suffix>.sqlite3`. The writer lock covers both backup and migration, so no acknowledged write can slip between them. Backup failure aborts the upgrade. Unknown versions and nonempty unversioned databases are rejected without reset; every operation checks the schema version.
+
+Existing tasks receive numbers in creation-event order, including completed/cancelled tasks. The migration does not change UUIDs, revisions, task fields, dependencies or historical event JSON. Old historical snapshots intentionally have no `task_number`; current snapshots and new events do. Missing creation events abort migration instead of inventing an order. No automatic downgrade is provided. Old server processes reject schema 2 with `unsupported_schema`; reconnect using the updated plugin/new thread, rather than resetting the database. Keep the backup, and do not restore over newer work without accounting for every post-upgrade change.
+
+Use a local disk, not a network-share SQLite WAL database. For routine backups, use SQLite's backup API, or shut down all writers and checkpoint before a filesystem backup; copying just the DB while WAL writers are running is insufficient.
 
 To update: run `install_runtime.py` if dependencies changed, use plugin-creator's cachebuster helper, reinstall `task-management@personal`, then open a new thread. Runtime environments are keyed by lock contents and Python major/minor version, so updating dependencies does not replace the environment used by an existing server. MCP startup never downloads packages.
 

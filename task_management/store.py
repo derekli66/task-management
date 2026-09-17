@@ -1,10 +1,13 @@
 """Transactional task rules for one local user and multiple cooperating callers."""
 import base64
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
+import re
 import sqlite3
+import tempfile
 import time
 import uuid
 
@@ -95,6 +98,7 @@ class TaskStore:
     def __init__(self, db_path, timeout=3.0):
         self.db_path = Path(db_path)
         self.timeout = timeout
+        self.migration_backup = None
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
@@ -118,8 +122,34 @@ class TaskStore:
     @staticmethod
     def _check_schema(db):
         version = db.execute("PRAGMA user_version").fetchone()[0]
-        if version != 1:
-            raise TaskError("unsupported_schema", f"Expected schema 1; found {version}")
+        if version != 2:
+            raise TaskError("unsupported_schema", f"Expected schema 2; found {version}; reload the task server")
+
+    def _backup_v1(self):
+        # The caller holds BEGIN IMMEDIATE, preventing an acknowledged write
+        # from landing between this consistent snapshot and the migration.
+        descriptor, path = tempfile.mkstemp(prefix=f"{self.db_path.name}.schema1.{now()}.",
+                                           suffix=".sqlite3", dir=self.db_path.parent)
+        os.close(descriptor)
+        with self._connection() as source, closing(sqlite3.connect(path)) as backup:
+            source.backup(backup)
+        self.migration_backup = Path(path)
+
+    @staticmethod
+    def _add_numbers(db):
+        # A separate mapping leaves UUID relationships and historical JSON intact.
+        # AUTOINCREMENT does not reuse a previously committed number.
+        db.execute("""CREATE TABLE task_numbers (
+            number INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id))""")
+        db.execute("""INSERT INTO task_numbers (task_id)
+            SELECT t.id FROM tasks t JOIN task_events e ON e.task_id=t.id
+            WHERE e.revision=1 AND e.action='create' ORDER BY e.seq""")
+        counts = db.execute("""SELECT (SELECT count(*) FROM tasks),
+                                      (SELECT count(*) FROM task_numbers)""").fetchone()
+        if counts[0] != counts[1]:
+            raise TaskError("storage_error", "Cannot number tasks with missing creation events")
+        db.execute("PRAGMA user_version=2")
 
     def _initialize(self):
         with self._connection() as db:
@@ -132,7 +162,10 @@ class TaskStore:
                 # executescript commits implicitly; individual statements keep initialization atomic.
                 for statement in SCHEMA:
                     db.execute(statement)
-                db.execute("PRAGMA user_version=1")
+                self._add_numbers(db)
+            elif version == 1:
+                self._backup_v1()
+                self._add_numbers(db)
             else:
                 self._check_schema(db)
             db.commit()
@@ -157,10 +190,13 @@ class TaskStore:
             db.commit()
 
     def _snapshot(self, db, workspace, task_id):
-        row = db.execute("SELECT * FROM tasks WHERE workspace=? AND id=?", (workspace, task_id)).fetchone()
+        row = db.execute("""SELECT t.*, n.number FROM tasks t
+            JOIN task_numbers n ON n.task_id=t.id WHERE t.workspace=? AND t.id=?""",
+            (workspace, task_id)).fetchone()
         if row is None:
             raise TaskError("not_found", "Task not found in this workspace")
         task = dict(row)
+        task["task_number"] = f"#{task.pop('number')}"
         task.pop("initial_payload")
         deps = db.execute("""SELECT t.id, t.status FROM dependencies d JOIN tasks t
             ON t.workspace=d.workspace AND t.id=d.depends_on
@@ -169,6 +205,21 @@ class TaskStore:
         task["unfinished_dependencies"] = [dep["id"] for dep in deps if dep["status"] != "completed"]
         task["ready"] = not task["unfinished_dependencies"]
         return task
+
+    @staticmethod
+    def _resolve_task_id(db, workspace, reference):
+        nonblank(reference, "task_id")
+        if not reference.startswith("#"):
+            return reference  # Preserve the original UUID API and not_found behavior.
+        digits = reference[1:]
+        if (len(digits) > 19 or not re.fullmatch(r"[1-9][0-9]*", digits)
+                or int(digits) > 9223372036854775807):
+            raise TaskError("invalid_input", "Task number must be # followed by a positive 64-bit integer")
+        row = db.execute("""SELECT t.id FROM task_numbers n JOIN tasks t ON t.id=n.task_id
+            WHERE n.number=? AND t.workspace=?""", (int(digits), workspace)).fetchone()
+        if row is None:
+            raise TaskError("not_found", "Task not found in this workspace")
+        return row["id"]
 
     def _validate_dependencies(self, db, workspace, task_id, dependencies):
         if not isinstance(dependencies, list) or any(not isinstance(x, str) or not x.strip() for x in dependencies):
@@ -226,6 +277,7 @@ class TaskStore:
                 description, done_when, priority, status, revision, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 1, ?, ?)""",
                 (task_id, workspace, request_id, payload, title, description, done_when, priority, timestamp, timestamp))
+            db.execute("INSERT INTO task_numbers (task_id) VALUES (?)", (task_id,))
             self._set_dependencies(db, workspace, task_id, dependencies)
             task = self._snapshot(db, workspace, task_id)
             self._event(db, None, task, "create", actor)
@@ -240,6 +292,7 @@ class TaskStore:
         if (metadata is None) == (action is None):
             raise TaskError("invalid_input", "Provide either metadata or action, never both")
         with self._transaction(write=True) as db:
+            task_id = self._resolve_task_id(db, workspace, task_id)
             before = self._snapshot(db, workspace, task_id)
             if before["revision"] != expected_revision:
                 raise TaskError("revision_conflict", "Task changed; read it again before deciding",
@@ -348,7 +401,7 @@ class TaskStore:
                               "ORDER BY created_at, id LIMIT ?", (*params, limit + 1)).fetchall()
             page = rows[:limit]
             tasks = [self._snapshot(db, workspace, row["id"]) for row in page]
-            summary_keys = {"id", "title", "status", "priority", "owner", "revision", "dependencies",
+            summary_keys = {"id", "task_number", "title", "status", "priority", "owner", "revision", "dependencies",
                             "ready", "unfinished_dependencies", "created_at", "updated_at", "workspace"}
             return {"tasks": [{key: value for key, value in task.items() if key in summary_keys} for task in tasks],
                     "next_cursor": encode_cursor(scope, [page[-1]["created_at"], page[-1]["id"]])
@@ -357,13 +410,14 @@ class TaskStore:
     def get(self, workspace, task_id, event_limit=20, event_cursor=None):
         workspace = workspace_key(workspace)
         page_limit(event_limit)
-        scope = ["events", workspace, task_id]
-        upper = 9223372036854775807
-        if event_cursor is not None:
-            upper = decode_cursor(event_cursor, scope)
-            if type(upper) is not int or not 0 < upper <= 9223372036854775807:
-                raise TaskError("invalid_cursor", "Invalid event position")
         with self._transaction() as db:
+            task_id = self._resolve_task_id(db, workspace, task_id)
+            scope = ["events", workspace, task_id]
+            upper = 9223372036854775807
+            if event_cursor is not None:
+                upper = decode_cursor(event_cursor, scope)
+                if type(upper) is not int or not 0 < upper <= 9223372036854775807:
+                    raise TaskError("invalid_cursor", "Invalid event position")
             task = self._snapshot(db, workspace, task_id)
             rows = db.execute("""SELECT * FROM task_events WHERE workspace=? AND task_id=? AND seq<?
                 ORDER BY seq DESC LIMIT ?""", (workspace, task_id, upper, event_limit + 1)).fetchall()

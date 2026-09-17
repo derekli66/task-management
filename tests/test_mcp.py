@@ -37,6 +37,9 @@ class MCPTest(unittest.TestCase):
                     self.assertEqual(json.loads(result.content[0].text), result.structured_content)
                     return result.structured_content
                 task = (await call("task_create", request_id="retry-key", title="測試", done_when="All checks pass"))["task"]
+                self.assertEqual(task["task_number"], "#1")
+                self.assertEqual((await call("task_list"))["tasks"][0]["task_number"], "#1")
+                self.assertEqual((await call("task_get", task_id="#1"))["task"], task)
                 retry = await call("task_create", request_id="retry-key", title="測試", done_when="All checks pass")
                 self.assertTrue(retry["reused"])
                 result = await client.call_tool("task_get", {"workspace":str(other), "task_id":task["id"]})
@@ -46,7 +49,7 @@ class MCPTest(unittest.TestCase):
                         ("release", {"reason":"Resume"}), ("start", {}),
                         ("complete", {"evidence":"Tests pass"}), ("reopen", {"reason":"Revise"}),
                         ("cancel", {"reason":"Unneeded"})):
-                    task = (await call("task_update", task_id=task["id"], expected_revision=task["revision"],
+                    task = (await call("task_update", task_id=task["task_number"], expected_revision=task["revision"],
                                        actor="test", action=action, **kwargs))["task"]
                 self.assertEqual((await call("task_list"))["tasks"], [])
                 self.assertEqual(len((await call("task_list", status="all"))["tasks"]), 1)
@@ -55,7 +58,7 @@ class MCPTest(unittest.TestCase):
                 self.assertTrue(result.is_error)
                 self.assertEqual(result.structured_content["error"]["code"], "revision_conflict")
             async with Client(params, mode=mode) as fresh:
-                result = await fresh.call_tool("task_get", {"workspace":workspace, "task_id":task["id"]})
+                result = await fresh.call_tool("task_get", {"workspace":workspace, "task_id":task["task_number"]})
                 self.assertFalse(result.is_error)
                 self.assertEqual(result.structured_content["task"], task)
                 self.assertEqual(len(result.structured_content["events"]), 8)
