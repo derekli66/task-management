@@ -38,7 +38,10 @@ class MCPTest(unittest.TestCase):
                     return result.structured_content
                 task = (await call("task_create", request_id="retry-key", title="測試", done_when="All checks pass"))["task"]
                 self.assertEqual(task["task_number"], "#1")
-                self.assertEqual((await call("task_list"))["tasks"][0]["task_number"], "#1")
+                task_page = await call("task_list")
+                self.assertEqual(task_page["tasks"][0]["task_number"], "#1")
+                self.assertEqual(task_page["summary"]["matching_total"], 1)
+                self.assertEqual(task_page["summary"]["by_status"]["pending"], 1)
                 self.assertEqual((await call("task_get", task_id="#1"))["task"], task)
                 retry = await call("task_create", request_id="retry-key", title="測試", done_when="All checks pass")
                 self.assertTrue(retry["reused"])

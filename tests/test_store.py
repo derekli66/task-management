@@ -174,17 +174,38 @@ class StoreTest(unittest.TestCase):
     def test_pagination_and_status_filters_do_not_drop_tasks_with_same_timestamp(self):
         tasks = [self.create() for _ in range(5)]
         page = self.store.list(self.workspace, limit=2)
+        expected_open_summary = {
+            "matching_total": 5,
+            "by_status": {"pending": 5, "in_progress": 0, "blocked": 0,
+                          "completed": 0, "cancelled": 0},
+        }
+        self.assertEqual(page["summary"], expected_open_summary)
         ids = [t["id"] for t in page["tasks"]]
         while page["next_cursor"]:
             page = self.store.list(self.workspace, limit=2, cursor=page["next_cursor"])
+            self.assertEqual(page["summary"], expected_open_summary)
             ids.extend(t["id"] for t in page["tasks"])
         self.assertCountEqual(ids, [t["id"] for t in tasks])
         done = self.action(self.action(tasks[0], "start"), "complete", evidence="Done")
-        self.assertEqual(len(self.store.list(self.workspace)["tasks"]), 4)
-        self.assertEqual([t["id"] for t in self.store.list(self.workspace,
-            status="completed")["tasks"]], [done["id"]])
-        self.assertEqual(len(self.store.list(self.workspace, status="all")["tasks"]), 5)
-        self.assertEqual(self.store.list(self.workspace, priority="high")["tasks"], [])
+        open_page = self.store.list(self.workspace)
+        self.assertEqual(len(open_page["tasks"]), 4)
+        self.assertEqual(open_page["summary"], {
+            "matching_total": 4,
+            "by_status": {"pending": 4, "in_progress": 0, "blocked": 0,
+                          "completed": 0, "cancelled": 0},
+        })
+        completed_page = self.store.list(self.workspace, status="completed")
+        self.assertEqual([t["id"] for t in completed_page["tasks"]], [done["id"]])
+        self.assertEqual(completed_page["summary"]["matching_total"], 1)
+        self.assertEqual(completed_page["summary"]["by_status"]["completed"], 1)
+        self.assertEqual(self.store.list(self.workspace, status="all")["summary"], {
+            "matching_total": 5,
+            "by_status": {"pending": 4, "in_progress": 0, "blocked": 0,
+                          "completed": 1, "cancelled": 0},
+        })
+        high_page = self.store.list(self.workspace, priority="high")
+        self.assertEqual(high_page["tasks"], [])
+        self.assertEqual(high_page["summary"]["matching_total"], 0)
         self.error("invalid_input", self.store.list, self.workspace, limit=101)
         self.error("invalid_cursor", self.store.list, self.workspace, cursor="bad")
         cursor = self.store.list(self.workspace, limit=1)["next_cursor"]

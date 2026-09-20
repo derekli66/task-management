@@ -381,15 +381,16 @@ class TaskStore:
         if status not in STATUSES | {"open", "all"} or (priority is not None and priority not in PRIORITIES):
             raise TaskError("invalid_input", "Unknown status or priority filter")
         scope = ["tasks", workspace, status, priority]
-        where, params = ["workspace=?"], [workspace]
+        filter_where, filter_params = ["workspace=?"], [workspace]
         if status == "open":
-            where.append("status NOT IN ('completed','cancelled')")
+            filter_where.append("status NOT IN ('completed','cancelled')")
         elif status != "all":
-            where.append("status=?")
-            params.append(status)
+            filter_where.append("status=?")
+            filter_params.append(status)
         if priority is not None:
-            where.append("priority=?")
-            params.append(priority)
+            filter_where.append("priority=?")
+            filter_params.append(priority)
+        where, params = list(filter_where), list(filter_params)
         if cursor is not None:
             position = decode_cursor(cursor, scope)
             if not isinstance(position, list) or len(position) != 2 or not all(isinstance(x, str) for x in position):
@@ -397,6 +398,15 @@ class TaskStore:
             where.append("(created_at, id) > (?, ?)")
             params.extend(position)
         with self._transaction() as db:
+            count_rows = db.execute(
+                f"SELECT status, count(*) AS count FROM tasks "
+                f"WHERE {' AND '.join(filter_where)} GROUP BY status",
+                filter_params).fetchall()
+            by_status = {name: 0 for name in
+                         ("pending", "in_progress", "blocked", "completed", "cancelled")}
+            for row in count_rows:
+                by_status[row["status"]] = row["count"]
+            summary = {"matching_total": sum(by_status.values()), "by_status": by_status}
             rows = db.execute(f"SELECT id, created_at FROM tasks WHERE {' AND '.join(where)} "
                               "ORDER BY created_at, id LIMIT ?", (*params, limit + 1)).fetchall()
             page = rows[:limit]
@@ -404,6 +414,7 @@ class TaskStore:
             summary_keys = {"id", "task_number", "title", "status", "priority", "owner", "revision", "dependencies",
                             "ready", "unfinished_dependencies", "created_at", "updated_at", "workspace"}
             return {"tasks": [{key: value for key, value in task.items() if key in summary_keys} for task in tasks],
+                    "summary": summary,
                     "next_cursor": encode_cursor(scope, [page[-1]["created_at"], page[-1]["id"]])
                     if len(rows) > limit else None}
 

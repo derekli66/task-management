@@ -75,7 +75,7 @@ def task_create(workspace: StrictStr, request_id: StrictStr, title: StrictStr, d
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
 def task_list(workspace: StrictStr, status: StatusFilter = "open", priority: Priority | None = None,
               limit: StrictInt = 20, cursor: StrictStr | None = None) -> CallToolResult:
-    """List summaries including task_number (#N). Default: unfinished tasks. Follow next_cursor for more."""
+    """List tasks plus exact filtered counts. Default: unfinished tasks. Follow next_cursor for more."""
     return invoke("list", workspace=workspace, status=status, priority=priority, limit=limit, cursor=cursor)
 
 
