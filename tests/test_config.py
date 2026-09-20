@@ -1,8 +1,16 @@
 """Pure application-data path contracts shared by the server and hooks."""
 from pathlib import Path
+import json
+import tempfile
 import unittest
 
-from task_management.config import data_directory, database_path, settings_path
+from task_management.config import (
+    data_directory,
+    database_path,
+    read_reminder_mode,
+    settings_path,
+    write_reminder_mode,
+)
 
 
 class ConfigTest(unittest.TestCase):
@@ -22,6 +30,26 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(database_path(
             environ={"TASK_MANAGEMENT_DB": configured}, home=Path("/unused")),
             Path(configured))
+
+    def test_reminder_mode_defaults_and_writes_atomically(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "nested/settings.json"
+            self.assertEqual(read_reminder_mode(path=path), "lifecycle")
+
+            write_reminder_mode("always", path=path)
+
+            self.assertEqual(read_reminder_mode(path=path), "always")
+            self.assertEqual(json.loads(path.read_text()), {"reminder_mode": "always"})
+            self.assertEqual(list(path.parent.glob("*.tmp")), [])
+
+    def test_invalid_reminder_settings_fail_closed_to_lifecycle(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "settings.json"
+            for content in ("not json", '{"reminder_mode":"unknown"}', "[]"):
+                path.write_text(content)
+                self.assertEqual(read_reminder_mode(path=path), "lifecycle")
+            with self.assertRaises(ValueError):
+                write_reminder_mode("sometimes", path=path)
 
 
 if __name__ == "__main__":

@@ -10,7 +10,15 @@ Requires Python 3.13+ and Codex with local plugin support. Select a 3.13+ interp
 python3 scripts/install_runtime.py
 ```
 
-This installs the pinned dependencies into `~/.local/share/task-management/runtime/<lock-id>-py<version>/` and generates the machine-local `.mcp.json`. It never installs this package globally. The generated interpreter path is absolute. The server starts from the installed plugin cache using `cwd: "."`; legacy Codex does not expand `${PLUGIN_ROOT}` inside MCP arguments.
+This installs the pinned dependencies into `~/.local/share/task-management/runtime/<lock-id>-py<version>/`, generates the machine-local `.mcp.json`, and initializes lifecycle-only task reminders. It never installs this package globally. The generated interpreter path is absolute. The server starts from the installed plugin cache using `cwd: "."`; legacy Codex does not expand `${PLUGIN_ROOT}` inside MCP arguments.
+
+To show a compact unfinished-task reminder after every assistant turn instead:
+
+```sh
+python3 scripts/install_runtime.py --reminder-mode always
+```
+
+Switch back with `--reminder-mode lifecycle`. The per-machine preference is stored at `~/.local/share/task-management/settings.json`; it is not workspace task data.
 
 For the personal marketplace created with this plugin:
 
@@ -23,6 +31,14 @@ Start a new Codex thread and use `/mcp` to confirm that the plugin's `tasks` ser
 > 使用 task-management，列出這個專案尚未完成的任務。
 
 > 把已核准的實作計畫建立成 TODO，列出完成條件與相依關係。
+
+## Workspace reminders
+
+Trusted bundled hooks read the same local database without creating or migrating it. At Codex `startup`, `resume`, `/clear`, and compaction, a visible warning-styled summary shows the exact unfinished count and up to five tasks. Completed and cancelled tasks are omitted. In `always` mode, the same summary is shown after every assistant turn through the Codex `Stop` hook; it does not create another model turn.
+
+The hooks must be reviewed and trusted before Codex runs them. They use a two-second timeout and fail quietly when the database is absent, busy, or unsupported. Stored titles are sanitized and bounded for display, and are never inserted into developer context.
+
+This works in Codex CLI and Codex local projects in the ChatGPT desktop app when the plugin and hook scripts are installed on that machine. It does not make the local SQLite database available to ChatGPT web/mobile, Codex cloud, or regular chats without a local repo workspace. The IDE extension does not support plugins. See the official [Codex hooks](https://learn.chatgpt.com/docs/hooks) and [plugin surfaces](https://learn.chatgpt.com/docs/plugins) documentation.
 
 New source checkouts also need a personal marketplace entry; use the Codex plugin-creator scaffold/marketplace helper for the selected source location. The machine-local marketplace and generated `.mcp.json` are not Git artifacts.
 
@@ -37,11 +53,11 @@ Pass either the UUID or the exact `"#N"` string as `task_id` to `task_get` and `
 | Tool | Main fields |
 |---|---|
 | task_create | workspace, request_id, title, done_when; optional description, priority, dependencies, actor |
-| task_list | workspace; optional status (`open` default / `all` / specific state), priority, limit, cursor |
+| task_list | workspace; optional status (`open` default / `all` / specific state), priority, limit, cursor; returns exact filtered summary |
 | task_get | workspace, task_id; optional event_limit, event_cursor |
 | task_update | workspace, task_id, expected_revision, actor; metadata OR action, with action-specific reason/evidence |
 
-Task and event pages default to 20 records, maximum 100. Follow `next_cursor` / `next_event_cursor`; a cursor is bound to its workspace, task/filter query. Pagination is a live view, not a snapshot across multiple calls. Events are newest first. Timestamps are UTC in `YYYYMMDD_hhmmss` format.
+Task and event pages default to 20 records, maximum 100. Follow `next_cursor` / `next_event_cursor`; a cursor is bound to its workspace, task/filter query. `task_list.summary.matching_total` and `summary.by_status` apply the workspace/status/priority filters before pagination, so they do not shrink on later pages. Pagination remains a live view, not a snapshot across multiple calls. Events are newest first. Timestamps are UTC in `YYYYMMDD_hhmmss` format.
 
 An example creation request (replace the workspace with your real project root):
 
@@ -74,7 +90,7 @@ Use a local disk, not a network-share SQLite WAL database. For routine backups, 
 
 To update: run `install_runtime.py` if dependencies changed, use plugin-creator's cachebuster helper, reinstall `task-management@personal`, then open a new thread. Runtime environments are keyed by lock contents and Python major/minor version, so updating dependencies does not replace the environment used by an existing server. MCP startup never downloads packages.
 
-No permanent-delete tool, parent/child hierarchy, native TODO panel, automatic scheduling, or cross-machine sync is provided. Completion evidence is a caller's record; the tool does not certify tests, commits, or human acceptance.
+No permanent-delete tool, parent/child hierarchy, native pinned TODO panel, automatic scheduling, or cross-machine sync is provided. Lifecycle reminders are Codex warning messages, not custom host chrome. Completion evidence is a caller's record; the tool does not certify tests, commits, or human acceptance.
 
 ## Verify
 
