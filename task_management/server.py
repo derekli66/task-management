@@ -2,7 +2,6 @@
 from functools import lru_cache
 import json
 import logging
-import os
 from pathlib import Path
 import sys
 from typing import Literal
@@ -12,6 +11,7 @@ from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, StrictInt, StrictStr
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from task_management.config import database_path
 from task_management.store import TaskError, TaskStore
 
 Priority = Literal["low", "normal", "high"]
@@ -38,8 +38,7 @@ mcp = MCPServer("task-management", version="0.1.0", instructions=
 
 @lru_cache(maxsize=1)
 def get_store():
-    path = Path(os.environ.get("TASK_MANAGEMENT_DB",
-        str(Path.home() / ".local/share/task-management/tasks.sqlite3")))
+    path = database_path()
     if not path.is_absolute():
         raise TaskError("invalid_configuration", "TASK_MANAGEMENT_DB must be an absolute path")
     return TaskStore(path)
