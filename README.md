@@ -10,9 +10,9 @@ Requires Python 3.13+ and Codex with local plugin support. Select a 3.13+ interp
 python3 scripts/install_runtime.py
 ```
 
-This installs the pinned dependencies into `~/.local/share/task-management/runtime/<lock-id>-py<version>/`, generates the machine-local `.mcp.json`, and initializes lifecycle-only task reminders. It never installs this package globally. The generated interpreter path is absolute. The server starts from the installed plugin cache using `cwd: "."`; legacy Codex does not expand `${PLUGIN_ROOT}` inside MCP arguments.
+This installs the pinned dependencies into `~/.local/share/task-management/runtime/<lock-id>-py<version>/`, generates the machine-local `.mcp.json`, and initializes event-driven task reminders. It never installs this package globally. The generated interpreter path is absolute. The server starts from the installed plugin cache using `cwd: "."`; legacy Codex does not expand `${PLUGIN_ROOT}` inside MCP arguments.
 
-To show a compact unfinished-task reminder after every assistant turn instead:
+To additionally show a compact unfinished-task reminder after every assistant turn:
 
 ```sh
 python3 scripts/install_runtime.py --reminder-mode always
@@ -34,11 +34,13 @@ Start a new Codex thread and use `/mcp` to confirm that the plugin's `tasks` ser
 
 ## Workspace reminders
 
-Trusted bundled hooks read the same local database without creating or migrating it. At Codex `startup`, `resume`, `/clear`, and compaction, a visible warning-styled summary shows the exact unfinished count and up to five tasks. Completed and cancelled tasks are omitted. In `always` mode, the same summary is shown after every assistant turn through the Codex `Stop` hook; it does not create another model turn.
+Trusted bundled hooks read the same local database without creating or migrating it. At Codex `startup`, `resume`, `/clear`, and compaction, a warning-styled summary shows the exact unfinished count and up to five tasks. The default `lifecycle` mode also redraws that summary after a proven successful `task_create` or `task_update` in the active workspace. Unrelated turns, failed mutations, and idempotent create retries do not redraw it. Closing the final task emits `Tasks · 0 unfinished`; this supersedes an earlier warning semantically, although the host may retain the earlier message in scrollback.
 
-The hooks must be reviewed and trusted before Codex runs them. They use a two-second timeout and fail quietly when the database is absent, busy, or unsupported. Stored titles are sanitized and bounded for display, and are never inserted into developer context.
+In `always` mode, the `Stop` hook additionally emits the summary after every assistant turn. A mutation turn can therefore show both its mutation redraw and its end-of-turn redraw. This opt-in mode is intentionally noisier; the default does not redraw on every turn. Parallel mutations may each show the same final workspace snapshot.
 
-This works in Codex CLI and Codex local projects in the ChatGPT desktop app when the plugin and hook scripts are installed on that machine. It does not make the local SQLite database available to ChatGPT web/mobile, Codex cloud, or regular chats without a local repo workspace. The IDE extension does not support plugins. See the official [Codex hooks](https://learn.chatgpt.com/docs/hooks) and [plugin surfaces](https://learn.chatgpt.com/docs/plugins) documentation.
+The hooks must be reviewed and trusted before Codex runs them. They use a two-second timeout and fail quietly when the database is absent, busy, unsupported, or when a mutation result cannot be proven successful. Stored titles are sanitized and bounded for display. Session-start context contains only the unfinished count and a direction to query the tools; mutation redraws return only `systemMessage` and do not start another model turn or add per-turn developer context. The bounded `workspace_overview` in successful mutation tool output is model-visible, but it replaces the extra `task_list` call that older versions required.
+
+Codex CLI renders the hook `systemMessage` as a visible warning. Codex local projects in the ChatGPT desktop app can run the installed MCP server and hooks, but the current desktop UI may not render that warning; the skill therefore also puts the bounded mutation summary at the end of the assistant response. Neither surface gets a pinned panel. The local SQLite database is unavailable to ChatGPT web/mobile, Codex cloud, regular chats without a local repo workspace, and the IDE extension. See the official [Codex hooks](https://learn.chatgpt.com/docs/hooks) and [plugin surfaces](https://learn.chatgpt.com/docs/plugins) documentation.
 
 New source checkouts also need a personal marketplace entry; use the Codex plugin-creator scaffold/marketplace helper for the selected source location. The machine-local marketplace and generated `.mcp.json` are not Git artifacts.
 
@@ -56,6 +58,8 @@ Pass either the UUID or the exact `"#N"` string as `task_id` to `task_get` and `
 | task_list | workspace; optional status (`open` default / `all` / specific state), priority, limit, cursor; returns exact filtered summary |
 | task_get | workspace, task_id; optional event_limit, event_cursor |
 | task_update | workspace, task_id, expected_revision, actor; metadata OR action, with action-specific reason/evidence |
+
+Successful `task_create` and `task_update` responses include a post-commit `workspace_overview`: exact unfinished counts plus at most five sanitized unfinished task titles. It may reflect a newer concurrent commit, which is safe for presentation. Older servers omit this field; callers then use `task_list(status="open")`. A failed mutation never includes the overview.
 
 Task and event pages default to 20 records, maximum 100. Follow `next_cursor` / `next_event_cursor`; a cursor is bound to its workspace, task/filter query. `task_list.summary.matching_total` and `summary.by_status` apply the workspace/status/priority filters before pagination, so they do not shrink on later pages. Pagination remains a live view, not a snapshot across multiple calls. Events are newest first. Timestamps are UTC in `YYYYMMDD_hhmmss` format.
 
@@ -90,7 +94,7 @@ Use a local disk, not a network-share SQLite WAL database. For routine backups, 
 
 To update: run `install_runtime.py` if dependencies changed, use plugin-creator's cachebuster helper, reinstall `task-management@personal`, then open a new thread. Runtime environments are keyed by lock contents and Python major/minor version, so updating dependencies does not replace the environment used by an existing server. MCP startup never downloads packages.
 
-No permanent-delete tool, parent/child hierarchy, native pinned TODO panel, automatic scheduling, or cross-machine sync is provided. Lifecycle reminders are Codex warning messages, not custom host chrome. Completion evidence is a caller's record; the tool does not certify tests, commits, or human acceptance.
+No permanent-delete tool, parent/child hierarchy, native pinned TODO panel, automatic scheduling, or cross-machine sync is provided. Task reminders are Codex warning messages plus a bounded assistant-response fallback, not custom host chrome. Completion evidence is a caller's record; the tool does not certify tests, commits, or human acceptance.
 
 ## Verify
 
