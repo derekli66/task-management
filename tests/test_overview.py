@@ -104,6 +104,29 @@ class OverviewTest(unittest.TestCase):
         self.assertNotIn("\u200b", rendered)
         self.assertLessEqual(len(rendered), 280)
 
+    def test_renderer_groups_ready_pending_tasks_before_waiting_tasks(self):
+        overview = {
+            "matching_total": 3,
+            "by_status": {"pending": 3, "in_progress": 0, "blocked": 0},
+            "tasks": [
+                {"task_number": "#11", "title": "Choose voice",
+                 "status": "pending", "ready": True},
+                {"task_number": "#20", "title": "Build medium course",
+                 "status": "pending", "ready": True},
+                {"task_number": "#12", "title": "Render lesson",
+                 "status": "pending", "ready": False},
+            ],
+            "remaining": 0,
+        }
+
+        rendered = render_overview(overview)
+
+        self.assertLess(rendered.index("Ready"), rendered.index("#11"))
+        self.assertLess(rendered.index("#20"), rendered.index("Waiting"))
+        self.assertLess(rendered.index("Waiting"), rendered.index("#12"))
+        self.assertIn("  ○ #11 Choose voice", rendered)
+        self.assertIn("  ◌ #12 Render lesson — waiting", rendered)
+
     def test_renderer_can_explicitly_replace_a_stale_snapshot_with_zero(self):
         overview = {
             "matching_total": 0,
