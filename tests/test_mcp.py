@@ -36,8 +36,11 @@ class MCPTest(unittest.TestCase):
                     self.assertFalse(result.is_error, str(result))
                     self.assertEqual(json.loads(result.content[0].text), result.structured_content)
                     return result.structured_content
-                task = (await call("task_create", request_id="retry-key", title="測試", done_when="All checks pass"))["task"]
+                created = await call("task_create", request_id="retry-key", title="測試", done_when="All checks pass")
+                task = created["task"]
                 self.assertEqual(task["task_number"], "#1")
+                self.assertEqual(created["workspace_overview"]["matching_total"], 1)
+                self.assertEqual(created["workspace_overview"]["tasks"][0]["task_number"], "#1")
                 task_page = await call("task_list")
                 self.assertEqual(task_page["tasks"][0]["task_number"], "#1")
                 self.assertEqual(task_page["summary"]["matching_total"], 1)
@@ -45,6 +48,7 @@ class MCPTest(unittest.TestCase):
                 self.assertEqual((await call("task_get", task_id="#1"))["task"], task)
                 retry = await call("task_create", request_id="retry-key", title="測試", done_when="All checks pass")
                 self.assertTrue(retry["reused"])
+                self.assertEqual(retry["workspace_overview"]["matching_total"], 1)
                 result = await client.call_tool("task_get", {"workspace":str(other), "task_id":task["id"]})
                 self.assertTrue(result.is_error)
                 self.assertEqual(result.structured_content["error"]["code"], "not_found")
@@ -52,9 +56,17 @@ class MCPTest(unittest.TestCase):
                         ("release", {"reason":"Resume"}), ("start", {}),
                         ("complete", {"evidence":"Tests pass"}), ("reopen", {"reason":"Revise"}),
                         ("cancel", {"reason":"Unneeded"})):
-                    task = (await call("task_update", task_id=task["task_number"], expected_revision=task["revision"],
-                                       actor="test", action=action, **kwargs))["task"]
+                    mutation = await call("task_update", task_id=task["task_number"],
+                                           expected_revision=task["revision"], actor="test",
+                                           action=action, **kwargs)
+                    task = mutation["task"]
                 self.assertEqual((await call("task_list"))["tasks"], [])
+                self.assertEqual(mutation["workspace_overview"], {
+                    "matching_total": 0,
+                    "by_status": {"pending": 0, "in_progress": 0, "blocked": 0},
+                    "tasks": [],
+                    "remaining": 0,
+                })
                 self.assertEqual(len((await call("task_list", status="all"))["tasks"]), 1)
                 result = await client.call_tool("task_update", {"workspace":workspace,
                     "task_id":task["id"], "expected_revision":1, "actor":"test", "action":"reopen", "reason":"Old"})

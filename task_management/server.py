@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, StrictInt, StrictStr
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from task_management.config import database_path
+from task_management.overview import OverviewUnavailable, read_safe_overview
 from task_management.store import TaskError, TaskStore
 
 Priority = Literal["low", "normal", "high"]
@@ -44,9 +45,18 @@ def get_store():
     return TaskStore(path)
 
 
-def invoke(operation, **arguments):
+def invoke(operation, *, include_overview=False, **arguments):
     try:
-        payload = getattr(get_store(), operation)(**arguments)
+        store = get_store()
+        payload = getattr(store, operation)(**arguments)
+        if include_overview:
+            try:
+                payload["workspace_overview"] = read_safe_overview(
+                    store.db_path, payload["task"]["workspace"], timeout=store.timeout,
+                )
+            except OverviewUnavailable:
+                # The mutation is already committed. Older/fallback clients can call task_list.
+                pass
         failed = False
     except TaskError as exc:
         payload = {"error": {"code": exc.code, "message": str(exc), "details": exc.details}}
@@ -68,7 +78,8 @@ def task_create(workspace: StrictStr, request_id: StrictStr, title: StrictStr, d
     Reuse the same request_id and content when retrying a lost response; the number stays the same.
     Dependencies use UUID ids, not #N references.
     """
-    return invoke("create", workspace=workspace, request_id=request_id, title=title, done_when=done_when,
+    return invoke("create", include_overview=True, workspace=workspace, request_id=request_id,
+                  title=title, done_when=done_when,
                   description=description, priority=priority, dependencies=dependencies, actor=actor)
 
 
@@ -96,7 +107,8 @@ def task_update(workspace: StrictStr, task_id: StrictStr, expected_revision: Str
     task to pending. On revision_conflict, read again before deciding. Owner is attribution, not a lock.
     Provide metadata OR action. Dependencies in metadata remain UUID ids; task_number is immutable.
     """
-    return invoke("update", workspace=workspace, task_id=task_id, expected_revision=expected_revision,
+    return invoke("update", include_overview=True, workspace=workspace, task_id=task_id,
+                  expected_revision=expected_revision,
                   actor=actor, metadata=metadata.model_dump(exclude_unset=True) if metadata is not None else None,
                   action=action, reason=reason, evidence=evidence)
 

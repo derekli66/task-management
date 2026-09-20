@@ -131,6 +131,17 @@ def sanitize_title(value: object, *, limit: int = 100) -> str:
     return text if len(text) <= limit else text[:max(1, limit - 1)].rstrip() + "…"
 
 
+def read_safe_overview(db_path: str | Path, workspace: str | Path, *, limit: int = 5,
+                       title_limit: int = 100, timeout: float = 0.1) -> dict:
+    """Return a bounded post-commit snapshot safe to include in a tool response."""
+    overview = read_overview(db_path, workspace, limit=limit, timeout=timeout)
+    overview["tasks"] = [
+        {**task, "title": sanitize_title(task.get("title"), limit=title_limit)}
+        for task in overview["tasks"]
+    ]
+    return overview
+
+
 def render_overview(overview: dict, *, title_limit: int = 100,
                     message_limit: int = 1200) -> str:
     """Render untrusted task titles as a compact, visibly delimited data block."""

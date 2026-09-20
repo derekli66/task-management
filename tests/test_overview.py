@@ -7,6 +7,7 @@ import unittest
 
 from task_management.overview import (
     OverviewUnavailable,
+    read_safe_overview,
     read_overview,
     render_overview,
     resolve_workspace,
@@ -102,6 +103,23 @@ class OverviewTest(unittest.TestCase):
         self.assertNotIn("\u202e", rendered)
         self.assertNotIn("\u200b", rendered)
         self.assertLessEqual(len(rendered), 280)
+
+    def test_safe_overview_bounds_and_sanitizes_mutation_snapshot(self):
+        for number in range(7):
+            title = "\x1b[31mUnsafe\x1b[0m\nline " + "x" * 150 if number == 0 else f"Task {number}"
+            self.create(f"task-{number}", title)
+
+        overview = read_safe_overview(self.db, self.workspace)
+
+        self.assertEqual(overview["matching_total"], 7)
+        self.assertEqual(overview["by_status"], {
+            "pending": 7, "in_progress": 0, "blocked": 0,
+        })
+        self.assertEqual(len(overview["tasks"]), 5)
+        self.assertEqual(overview["remaining"], 2)
+        self.assertNotIn("\x1b", overview["tasks"][0]["title"])
+        self.assertNotIn("\n", overview["tasks"][0]["title"])
+        self.assertLessEqual(len(overview["tasks"][0]["title"]), 100)
 
     def test_resolves_git_worktree_root_and_non_git_directory(self):
         repo = self.root / "repo"
