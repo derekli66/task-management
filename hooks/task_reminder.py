@@ -16,20 +16,87 @@ from task_management.overview import (
 )
 
 
+MUTATION_TOOLS = {
+    "mcp__tasks__task_create",
+    "mcp__tasks__task_update",
+}
+
+
 def debug(message):
     if os.environ.get("TASK_MANAGEMENT_HOOK_DEBUG") == "1":
         print(f"task-management hook: {message}", file=sys.stderr)
 
 
+def canonical_directory(value):
+    try:
+        path = Path(value).resolve(strict=True)
+        if not path.is_dir():
+            raise ValueError()
+        return path
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise OverviewUnavailable("workspace is not an existing directory") from exc
+
+
+def structured_tool_result(response):
+    """Extract a successful MCP result while rejecting unknown/error shapes."""
+    if not isinstance(response, dict):
+        return None
+    for key in ("isError", "is_error"):
+        if key in response and response[key] is not False:
+            return None
+    candidates = [response.get("structuredContent"), response.get("structured_content")]
+    if "task" in response or "error" in response:
+        candidates.append(response)
+    content = response.get("content")
+    if isinstance(content, list):
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "text":
+                continue
+            try:
+                candidates.append(json.loads(block.get("text", "")))
+            except (json.JSONDecodeError, TypeError):
+                continue
+    for candidate in candidates:
+        if isinstance(candidate, dict) and "error" not in candidate and isinstance(candidate.get("task"), dict):
+            return candidate
+    return None
+
+
+def successful_mutation(payload, workspace):
+    tool_name = payload.get("tool_name")
+    if tool_name not in MUTATION_TOOLS:
+        return False
+    result = structured_tool_result(payload.get("tool_response"))
+    if result is None or (tool_name.endswith("task_create") and result.get("reused") is True):
+        return False
+    task = result["task"]
+    if (not isinstance(task.get("id"), str) or not task["id"].strip()
+            or task.get("status") not in {"pending", "in_progress", "blocked", "completed", "cancelled"}
+            or type(task.get("revision")) is not int or task["revision"] < 1):
+        return False
+    try:
+        return canonical_directory(task.get("workspace")) == workspace
+    except OverviewUnavailable:
+        return False
+
+
 def response_for(payload):
     event = payload.get("hook_event_name")
-    if event not in {"SessionStart", "Stop"}:
+    if event not in {"SessionStart", "PostToolUse", "Stop"}:
         return None
     if event == "Stop" and read_reminder_mode() != "always":
         return None
-    workspace = resolve_workspace(payload.get("cwd"))
+    active_workspace = resolve_workspace(payload.get("cwd"))
+    workspace = active_workspace
+    if event == "PostToolUse":
+        tool_input = payload.get("tool_input")
+        if not isinstance(tool_input, dict):
+            return None
+        workspace = canonical_directory(tool_input.get("workspace"))
+        if workspace != active_workspace or not successful_mutation(payload, workspace):
+            return None
     overview = read_overview(database_path(), workspace)
-    message = render_overview(overview)
+    message = render_overview(overview, include_empty=event == "PostToolUse")
     if not message:
         return None
     response = {"systemMessage": message}

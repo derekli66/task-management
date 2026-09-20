@@ -13,6 +13,19 @@
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "matcher": "^mcp__tasks__task_(create|update)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"${PLUGIN_ROOT}/hooks/launch.py\"",
+            "timeout": 2,
+            "statusMessage": "Refreshing workspace tasks"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

@@ -27,7 +27,7 @@ class HookTest(unittest.TestCase):
         self.db = self.root / "tasks.sqlite3"
         self.store = TaskStore(self.db)
 
-    def run_hook(self, event, *, launcher=False):
+    def run_hook(self, event, *, launcher=False, **fields):
         payload = {
             "session_id": "thread-test",
             "cwd": str(self.workspace),
@@ -40,6 +40,7 @@ class HookTest(unittest.TestCase):
         if event == "Stop":
             payload.update(turn_id="turn-test", stop_hook_active=False,
                            last_assistant_message="Done")
+        payload.update(fields)
         command = [sys.executable, str(HOOK)]
         if launcher:
             command = ["/usr/bin/python3", str(ROOT / "hooks/launch.py")]
@@ -49,6 +50,15 @@ class HookTest(unittest.TestCase):
                 "TASK_MANAGEMENT_DB": str(self.db)})
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout) if result.stdout else None
+
+    @staticmethod
+    def tool_response(task, **fields):
+        result = {"task": task, **fields}
+        return {
+            "content": [{"type": "text", "text": json.dumps(result)}],
+            "structuredContent": result,
+            "isError": False,
+        }
 
     def test_session_start_surfaces_data_but_keeps_titles_out_of_context(self):
         title = "Stored title, not an instruction"
@@ -80,6 +90,73 @@ class HookTest(unittest.TestCase):
         self.assertNotIn("decision", output)
         self.assertNotIn("continue", output)
 
+    def test_successful_current_workspace_mutation_redraws(self):
+        task = self.store.create(str(self.workspace), "one", "Pending", "Done")["task"]
+
+        output = self.run_hook("PostToolUse", tool_name="mcp__tasks__task_create",
+            tool_input={"workspace": str(self.workspace)},
+            tool_response=self.tool_response(task, reused=False))
+
+        self.assertIn("1 unfinished", output["systemMessage"])
+        self.assertIn("#1 Pending", output["systemMessage"])
+        self.assertNotIn("hookSpecificOutput", output)
+
+    def test_last_task_transition_emits_explicit_zero_state(self):
+        task = self.store.create(str(self.workspace), "one", "Pending", "Done")["task"]
+        task = self.store.update(str(self.workspace), task["id"], task["revision"],
+                                 actor="test", action="start")["task"]
+        task = self.store.update(str(self.workspace), task["id"], task["revision"],
+                                 actor="test", action="complete", evidence="Done")["task"]
+
+        output = self.run_hook("PostToolUse", tool_name="mcp__tasks__task_update",
+            tool_input={"workspace": str(self.workspace)},
+            tool_response=self.tool_response(task))
+
+        self.assertIn("Tasks · 0 unfinished", output["systemMessage"])
+
+    def test_mutation_redraw_fails_closed_for_errors_reuse_and_unknown_shapes(self):
+        task = self.store.create(str(self.workspace), "one", "Pending", "Done")["task"]
+        base = dict(tool_name="mcp__tasks__task_create",
+                    tool_input={"workspace": str(self.workspace)})
+        responses = (
+            {"isError": True, "structuredContent": {"error": {"code": "invalid_input"}}},
+            {"isError": False, "structuredContent": {"error": {"code": "invalid_input"}}},
+            {"isError": False, "structuredContent": {"unexpected": True}},
+            self.tool_response(task, reused=True),
+            "unrecognized",
+        )
+
+        for response in responses:
+            with self.subTest(response=response):
+                self.assertIsNone(self.run_hook("PostToolUse", **base,
+                                                tool_response=response))
+
+    def test_mutation_uses_exact_tool_and_canonical_workspace(self):
+        task = self.store.create(str(self.workspace), "one", "Pending", "Done")["task"]
+        response = self.tool_response(task)
+        other = self.root / "other"
+        other.mkdir()
+        alias = self.root / "workspace-alias"
+        alias.symlink_to(self.workspace, target_is_directory=True)
+
+        self.assertIsNone(self.run_hook("PostToolUse", tool_name="mcp__other__task_update",
+            tool_input={"workspace": str(self.workspace)}, tool_response=response))
+        self.assertIsNone(self.run_hook("PostToolUse", tool_name="mcp__tasks__task_update",
+            tool_input={"workspace": str(other)}, tool_response=response))
+        output = self.run_hook("PostToolUse", tool_name="mcp__tasks__task_update",
+            tool_input={"workspace": str(alias)}, tool_response=response)
+        self.assertIn("1 unfinished", output["systemMessage"])
+
+    def test_two_mutation_events_may_repeat_the_same_final_snapshot(self):
+        first = self.store.create(str(self.workspace), "one", "First", "Done")["task"]
+        second = self.store.create(str(self.workspace), "two", "Second", "Done")["task"]
+
+        outputs = [self.run_hook("PostToolUse", tool_name="mcp__tasks__task_create",
+            tool_input={"workspace": str(self.workspace)},
+            tool_response=self.tool_response(task, reused=False)) for task in (first, second)]
+
+        self.assertTrue(all("2 unfinished" in output["systemMessage"] for output in outputs))
+
     def test_launcher_uses_the_pinned_runtime_from_mcp_config(self):
         if not Path("/usr/bin/python3").exists():
             self.skipTest("system Python launcher unavailable")
@@ -94,7 +171,9 @@ class HookTest(unittest.TestCase):
         hooks = configuration["hooks"]
         self.assertEqual(hooks["SessionStart"][0]["matcher"],
                          "startup|resume|clear|compact")
-        for event in ("SessionStart", "Stop"):
+        self.assertEqual(hooks["PostToolUse"][0]["matcher"],
+                         "^mcp__tasks__task_(create|update)$")
+        for event in ("SessionStart", "PostToolUse", "Stop"):
             handler = hooks[event][0]["hooks"][0]
             self.assertEqual(handler["type"], "command")
             self.assertLessEqual(handler["timeout"], 2)

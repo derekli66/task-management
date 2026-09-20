@@ -104,6 +104,18 @@ class OverviewTest(unittest.TestCase):
         self.assertNotIn("\u200b", rendered)
         self.assertLessEqual(len(rendered), 280)
 
+    def test_renderer_can_explicitly_replace_a_stale_snapshot_with_zero(self):
+        overview = {
+            "matching_total": 0,
+            "by_status": {"pending": 0, "in_progress": 0, "blocked": 0},
+            "tasks": [],
+            "remaining": 0,
+        }
+
+        self.assertEqual(render_overview(overview), "")
+        self.assertIn("Tasks · 0 unfinished",
+                      render_overview(overview, include_empty=True))
+
     def test_safe_overview_bounds_and_sanitizes_mutation_snapshot(self):
         for number in range(7):
             title = "\x1b[31mUnsafe\x1b[0m\nline " + "x" * 150 if number == 0 else f"Task {number}"

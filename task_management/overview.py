@@ -142,11 +142,11 @@ def read_safe_overview(db_path: str | Path, workspace: str | Path, *, limit: int
     return overview
 
 
-def render_overview(overview: dict, *, title_limit: int = 100,
+def render_overview(overview: dict, *, include_empty: bool = False, title_limit: int = 100,
                     message_limit: int = 1200) -> str:
     """Render untrusted task titles as a compact, visibly delimited data block."""
     total = overview.get("matching_total", 0)
-    if type(total) is not int or total <= 0:
+    if type(total) is not int or total < 0 or (total == 0 and not include_empty):
         return ""
     counts = overview.get("by_status", {})
     details = ", ".join(
