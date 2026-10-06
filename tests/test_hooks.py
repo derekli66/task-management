@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 from task_management.config import settings_path, write_reminder_mode
-from task_management.store import TaskStore
+from tests.session_adapter import TaskStore, Numbering
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,7 +24,8 @@ class HookTest(unittest.TestCase):
         self.home.mkdir()
         self.workspace = self.root / "workspace"
         self.workspace.mkdir()
-        self.db = self.root / "tasks.sqlite3"
+        self.db = self.root / "data"
+        Numbering(self.db).initialize()
         self.store = TaskStore(self.db)
 
     def run_hook(self, event, *, launcher=False, **fields):
@@ -47,7 +48,7 @@ class HookTest(unittest.TestCase):
         result = subprocess.run(command, input=json.dumps(payload), text=True,
             capture_output=True, timeout=5, env={**os.environ,
                 "HOME": str(self.home), "PLUGIN_ROOT": str(ROOT),
-                "TASK_MANAGEMENT_DB": str(self.db)})
+                "TASK_MANAGEMENT_DATA": str(self.db)})
         self.assertEqual(result.returncode, 0, result.stderr)
         return json.loads(result.stdout) if result.stdout else None
 
@@ -74,10 +75,36 @@ class HookTest(unittest.TestCase):
         self.assertIn("task_list", context)
         self.assertNotIn(title, context)
 
-    def test_session_start_is_quiet_for_empty_or_unavailable_storage(self):
-        self.assertIsNone(self.run_hook("SessionStart"))
-        self.db.unlink()
-        self.assertIsNone(self.run_hook("SessionStart"))
+    def test_session_start_always_provides_scope_even_when_empty_or_unavailable(self):
+        output = self.run_hook("SessionStart")
+        self.assertNotIn("systemMessage", output)
+        self.assertIn('session_id="thread-test"', output["hookSpecificOutput"]["additionalContext"])
+        (self.db / "numbering.md").unlink()
+        output = self.run_hook("SessionStart")
+        self.assertIn("unavailable", output["hookSpecificOutput"]["additionalContext"])
+
+    def test_resume_clear_compact_keep_full_notes_for_the_same_id(self):
+        notes = "## 問題\ncache key\n## 解法\n加入 user ID\n## 下一步\n新增測試\n"
+        task = self.store.create(str(self.workspace),"deferred","Research","Verified",description=notes)["task"]
+        for source in ("startup","resume","clear","compact"):
+            output = self.run_hook("SessionStart",source=source)
+            context = output["hookSpecificOutput"]["additionalContext"]
+            self.assertIn('session_id="thread-test"',context)
+            self.assertEqual(self.store.get(str(self.workspace),task["id"])["task"]["description"],notes)
+        output = self.run_hook("SessionStart",source="clear",session_id="another-real-id")
+        self.assertIn("0 unfinished",output["hookSpecificOutput"]["additionalContext"])
+
+    def test_scope_mismatch_is_denied_before_write_and_ignored_after_write(self):
+        output = self.run_hook("PreToolUse", tool_name="mcp__tasks__task_create",
+            tool_input={"workspace":str(self.workspace), "session_id":"wrong"})
+        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], "deny")
+        self.assertIsNone(self.run_hook("PreToolUse", tool_name="mcp__tasks__task_create",
+            tool_input={"workspace":str(self.workspace), "session_id":"thread-test"}))
+        task = self.store.create(str(self.workspace), "key", "Title", "Done")["task"]
+        task["session_id"] = "wrong"
+        self.assertIsNone(self.run_hook("PostToolUse", tool_name="mcp__tasks__task_create",
+            tool_input={"workspace":str(self.workspace), "session_id":"thread-test"},
+            tool_response=self.tool_response(task)))
 
     def test_stop_is_opt_in_and_never_forces_an_extra_turn(self):
         self.store.create(str(self.workspace), "one", "Pending", "Done")
@@ -94,7 +121,7 @@ class HookTest(unittest.TestCase):
         task = self.store.create(str(self.workspace), "one", "Pending", "Done")["task"]
 
         output = self.run_hook("PostToolUse", tool_name="mcp__tasks__task_create",
-            tool_input={"workspace": str(self.workspace)},
+            tool_input={"session_id":"thread-test", "workspace": str(self.workspace)},
             tool_response=self.tool_response(task, reused=False))
 
         self.assertIn("1 unfinished", output["systemMessage"])
@@ -109,7 +136,7 @@ class HookTest(unittest.TestCase):
                                  actor="test", action="complete", evidence="Done")["task"]
 
         output = self.run_hook("PostToolUse", tool_name="mcp__tasks__task_update",
-            tool_input={"workspace": str(self.workspace)},
+            tool_input={"session_id":"thread-test", "workspace": str(self.workspace)},
             tool_response=self.tool_response(task))
 
         self.assertIn("Tasks · 0 unfinished", output["systemMessage"])
@@ -117,7 +144,7 @@ class HookTest(unittest.TestCase):
     def test_mutation_redraw_fails_closed_for_errors_reuse_and_unknown_shapes(self):
         task = self.store.create(str(self.workspace), "one", "Pending", "Done")["task"]
         base = dict(tool_name="mcp__tasks__task_create",
-                    tool_input={"workspace": str(self.workspace)})
+                    tool_input={"session_id":"thread-test", "workspace": str(self.workspace)})
         responses = (
             {"isError": True, "structuredContent": {"error": {"code": "invalid_input"}}},
             {"isError": False, "structuredContent": {"error": {"code": "invalid_input"}}},
@@ -140,11 +167,11 @@ class HookTest(unittest.TestCase):
         alias.symlink_to(self.workspace, target_is_directory=True)
 
         self.assertIsNone(self.run_hook("PostToolUse", tool_name="mcp__other__task_update",
-            tool_input={"workspace": str(self.workspace)}, tool_response=response))
+            tool_input={"session_id":"thread-test", "workspace": str(self.workspace)}, tool_response=response))
         self.assertIsNone(self.run_hook("PostToolUse", tool_name="mcp__tasks__task_update",
-            tool_input={"workspace": str(other)}, tool_response=response))
+            tool_input={"session_id":"thread-test", "workspace": str(other)}, tool_response=response))
         output = self.run_hook("PostToolUse", tool_name="mcp__tasks__task_update",
-            tool_input={"workspace": str(alias)}, tool_response=response)
+            tool_input={"session_id":"thread-test", "workspace": str(alias)}, tool_response=response)
         self.assertIn("1 unfinished", output["systemMessage"])
 
     def test_two_mutation_events_may_repeat_the_same_final_snapshot(self):
@@ -152,7 +179,7 @@ class HookTest(unittest.TestCase):
         second = self.store.create(str(self.workspace), "two", "Second", "Done")["task"]
 
         outputs = [self.run_hook("PostToolUse", tool_name="mcp__tasks__task_create",
-            tool_input={"workspace": str(self.workspace)},
+            tool_input={"session_id":"thread-test", "workspace": str(self.workspace)},
             tool_response=self.tool_response(task, reused=False)) for task in (first, second)]
 
         self.assertTrue(all("2 unfinished" in output["systemMessage"] for output in outputs))

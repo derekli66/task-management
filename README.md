@@ -1,107 +1,149 @@
 # Local Task Management
 
-A personal Codex plugin with four MCP tools, a usage skill, and SQLite storage. Task lists survive server restarts and new conversations. Each project/worktree has its own namespace.
+A personal Codex plugin with four local MCP tools. Version 0.2 replaces normal SQLite CRUD with session-scoped Markdown, retaining task numbers, UUIDs, dependencies, revisions, idempotent creation, evidence and full event history.
 
-## Install
+Each real Codex session owns a separate TODO within its workspace. Notes can contain the investigated cause, suggested fix, evidence and next step—not just a title. Resuming the same session restores its notes; a new session does not silently inherit another list. This is a breaking tool-contract change: every call now requires `session_id`.
 
-Requires Python 3.13+ and Codex with local plugin support. Select a 3.13+ interpreter explicitly if your shell's `python3` changes between projects.
+## Storage
+
+```text
+<workspace>/.codex/task-management/sessions/<real-session-id>/
+  tasks.md       canonical: ALL tasks, ordinary Markdown notes, metadata and history
+  index.md       generated unfinished view, Ready before Waiting
+  archive.md     generated completed/cancelled view
+  .lock          stable cooperative writer lock
+
+~/.local/share/task-management/
+  numbering.md   machine-wide number reservations and import receipts
+  activation.md  activation witness and recoverable pending ledger commit
+  numbering.lock
+  cutover.md     legacy cutover journal, source identity and original file modes
+  legacy-<uuid>.sqlite3  read-only consistent backup (legacy cutover only)
+  tasks.sqlite3  retained original legacy database
+```
+
+`tasks.md` is the only source for task state. Moving a task to completed updates it and its event in that ONE file; archive/index are rebuilt afterward. A failed view refresh returns committed success with a warning. Neither view is independently editable.
+
+Before writing private task data, the tool installs and verifies `/.codex/task-management/` in the local Git `info/exclude`. Tracked task files cause a refusal, not automatic removal from Git. Worktrees use Git's resolved exclude path. Non-Git directories get a self-ignoring nested `.gitignore`, so later `git init` still excludes the data. Deliberate `git add -f` can bypass exclusions.
+
+`TASK_MANAGEMENT_DATA` selects an absolute, canonical machine-data directory. `TASK_MANAGEMENT_DB` is only used by explicit migration scripts; normal MCP tools never open SQLite. No daemon, network service or scheduler is introduced. Returned task text still enters the model conversation.
+
+## Install and activate
+
+Requires Python 3.13+, Git for Git workspaces, local disk, and a supported local Codex client. Locking uses Unix `fcntl.flock`; Windows and network filesystems are not supported in this version. Legacy cutover additionally requires `lsof` and an unprivileged account capable of enforcing the read-only fence.
 
 ```sh
 python3 scripts/install_runtime.py
 ```
 
-This installs the pinned dependencies into `~/.local/share/task-management/runtime/<lock-id>-py<version>/`, generates the machine-local `.mcp.json`, and initializes event-driven task reminders. It never installs this package globally. The generated interpreter path is absolute. The server starts from the installed plugin cache using `cwd: "."`; legacy Codex does not expand `${PLUGIN_ROOT}` inside MCP arguments.
+Use the 3.13+ interpreter explicitly. Setup installs the locked dependencies into the machine-local runtime and generates `.mcp.json`; it NEVER initializes numbering, imports tasks or changes the old DB. Use the printed runtime interpreter for the following commands (shown as `<runtime-python>`).
 
-To additionally show a compact unfinished-task reminder after every assistant turn:
+For a genuinely fresh install, with no old DB at the configured/default path:
 
 ```sh
-python3 scripts/install_runtime.py --reminder-mode always
+<runtime-python> scripts/cutover_tasks.py --fresh
 ```
 
-Switch back with `--reminder-mode lifecycle`. The per-machine preference is stored at `~/.local/share/task-management/settings.json`; it is not workspace task data.
+Missing ledger/activation in ordinary CRUD is an error, never a reason to restart numbering at #1. If either file exists but is corrupt/missing, preserve it and recover a verified backup; `--fresh` does not reset it. Do not point a fresh initializer at an alternate absent DB to sidestep an existing legacy source.
 
-For the personal marketplace created with this plugin:
+For an existing personal marketplace, install the new source version only after following the legacy cutover procedure below:
 
 ```sh
+codex plugin remove task-management@personal
 codex plugin add task-management@personal
 ```
 
-Start a new Codex thread and use `/mcp` to confirm that the plugin's `tasks` server exposes `task_create`, `task_list`, `task_get`, and `task_update`. Try:
+Then restart the ChatGPT desktop app or start/reconnect the CLI, and use a new thread to load the new tool schemas and skill. The running old process is not updated by changing the source checkout. Marketplace paths are relative to the marketplace root; local plugin installation/cache behavior is described in the [official local-plugin guidance](https://developers.openai.com/plugins/build/plugins#install-a-local-plugin-manually). CLI commands are documented in [developer commands](https://learn.chatgpt.com/docs/developer-commands#codex-plugin).
 
-> 使用 task-management，列出這個專案尚未完成的任務。
+## Upgrade an existing SQLite installation
 
-> 把已核准的實作計畫建立成 TODO，列出完成條件與相依關係。
+The old DB knows workspaces, NOT historical session IDs. Choose one real destination session for the complete task graph of each old workspace. Do not guess how tasks belonged to prior chats or split a dependency graph automatically.
 
-## Workspace reminders
+1. Preview the old source while it is readable; the exporter uses a read-only schema-2 transaction and never auto-upgrades schema 1:
 
-Trusted bundled hooks read the same local database without creating or migrating it. At Codex `startup`, `resume`, `/clear`, and compaction, a warning-styled summary shows the exact unfinished count and up to five tasks. Pending work is visibly grouped as `Ready` then `Waiting`, preserving the actionable-first order instead of sorting by task number. The default `lifecycle` mode also redraws that summary after a proven successful `task_create` or `task_update` in the active workspace. Unrelated turns, failed mutations, and idempotent create retries do not redraw it. Closing the final task emits `Tasks · 0 unfinished`; this supersedes an earlier warning semantically, although the host may retain the earlier message in scrollback.
+   ```sh
+   <runtime-python> scripts/export_legacy_tasks.py --preview
+   ```
 
-In `always` mode, the `Stop` hook additionally emits the summary after every assistant turn. A mutation turn can therefore show both its mutation redraw and its end-of-turn redraw. This opt-in mode is intentionally noisier; the default does not redraw on every turn. Parallel mutations may each show the same final workspace snapshot.
+   An idle WAL source without readable sidecars can be unavailable to read-only SQLite on some runtimes. Do not reopen it writable just to preview; after fencing, preview the verified `snapshot_path` reported by cutover with `--db /absolute/backup.sqlite3`.
 
-The hooks must be reviewed and trusted before Codex runs them. They use a two-second timeout and fail quietly when the database is absent, busy, unsupported, or when a mutation result cannot be proven successful. Stored titles are sanitized and bounded for display. Session-start context contains only the unfinished count and a direction to query the tools; mutation redraws return only `systemMessage` and do not start another model turn or add per-turn developer context. The bounded `workspace_overview` in successful mutation tool output is model-visible, but it replaces the extra `task_list` call that older versions required.
+2. Save handoffs, disable/close ALL old launchers and MCP connections—including other CLI/App sessions. This repo's script does not kill them. The operator's `--writers-stopped` confirmation is necessary but not sufficient: `lsof` must also show that all source DB/WAL/SHM descriptors are closed. Do not let an old launcher reconnect during cutover.
 
-Codex CLI renders the hook `systemMessage` as a visible warning. Codex local projects in the ChatGPT desktop app can run the installed MCP server and hooks, but the current desktop UI may not render that warning; the skill therefore also puts the bounded mutation summary at the end of the assistant response. Neither surface gets a pinned panel. The local SQLite database is unavailable to ChatGPT web/mobile, Codex cloud, regular chats without a local repo workspace, and the IDE extension. See the official [Codex hooks](https://learn.chatgpt.com/docs/hooks) and [plugin surfaces](https://learn.chatgpt.com/docs/plugins) documentation.
+3. Run the explicit cutover:
 
-New source checkouts also need a personal marketplace entry; use the Codex plugin-creator scaffold/marketplace helper for the selected source location. The machine-local marketplace and generated `.mcp.json` are not Git artifacts.
+   ```sh
+   <runtime-python> scripts/cutover_tasks.py --writers-stopped
+   ```
+
+   It obtains a writer guard without changing task rows, creates/verifies a consistent read-only backup, durably records original modes, fences the old DB and existing sidecars, CLOSES the guard, and verifies a new old writer fails with `SQLITE_READONLY` (not merely busy). Only then does it initialize numbering from both task numbers and SQLite's high-water sequence. Interrupted cutover uses `cutover.md`; retry the same source, never delete the journal. Failure before activation leaves preserved files and an explicit error; a partially applied fence may remain.
+
+4. Install/reload the new plugin as above. The SessionStart hook supplies the real session ID even if the list is empty or storage unavailable. Import a selected workspace into that real session:
+
+   ```sh
+   <runtime-python> scripts/export_legacy_tasks.py \
+     --workspace /absolute/worktree/root --session-id REAL_HOST_SESSION_ID
+   ```
+
+   Add `--db /absolute/original/tasks.sqlite3` if the legacy source is not the default. The importer verifies the bound source identity and reads its consistent cutover backup. It imports all statuses and preserves UUIDs, original numbers, revisions, initial payloads, dependencies, research notes, evidence and historical snapshots, including sparse old JSON.
+
+5. Verify task/event counts, full notes, dependencies and `git check-ignore` before doing new work. Import receipts reserve one destination BEFORE writing its task file. A crash can be recovered only in that destination; normal mutations there remain blocked while the receipt is pending. A committed retry does not overwrite subsequent legitimate updates. A different destination/source or nonempty target is refused.
+
+No real DB is automatically cut over by an install, tool call or test. The original DB's task rows are retained; cutover intentionally changes its file permissions. The backup and journals stay outside the plugin cache.
+
+### Recovery and rollback boundaries
+
+The numbering ledger uses a pending activation journal before every replacement, so interrupted reservations replay without reusing numbers. Missing/mismatched active files and single-file stale backups are refused. Simultaneously restoring two self-consistent OLD global files cannot reveal every later reservation; reconcile all session files and receipts before any backup rollback. Never merge divergent namespaces as one numbering history.
+
+Reinstalling 0.1 does NOT import post-cutover Markdown changes back into SQLite. Before rollback, stop all Markdown writers, preserve their files, and explicitly reconcile any new work. Original permission modes are recorded in `cutover.md`; restoring them re-enables old writers and is a deliberate rollback operation, not part of uninstall. Never automatically chmod the original source writable after a failed test or cache update.
 
 ## Tool contract
 
-Every call requires an absolute `workspace` directory. Use the Git worktree root, not a varying subdirectory. Symlink aliases resolve to the same workspace; distinct worktrees and clones are separate. Renaming/moving a workspace creates a new namespace; automatic relocation is not implemented.
-
-Every task has a human-readable `task_number` such as `"#1"`, `"#2"`, `"#3"` and the original UUID `id`. Numbers are immutable and increase across all workspaces in **one database**. Completed, cancelled or reopened tasks retain their numbers. A retry of the same creation request returns the original number. Separate databases/machines can have the same numbers; the UUID remains the durable internal identity. Restoring an older backup also restores its numbering state, so never merge references from divergent database histories as though they were one sequence.
-
-Pass either the UUID or the exact `"#N"` string as `task_id` to `task_get` and `task_update`. Workspace checks and `expected_revision` still apply. Numbers are positive ASCII integers without leading zeros, up to SQLite's signed 64-bit limit. They are not editable metadata. Dependency arrays and error-detail task IDs remain UUIDs: look up `#N` first and use its returned `id` for dependencies. Listing/pagination order is unchanged (creation timestamp, then UUID), not numeric order.
+Every call requires absolute canonical `workspace` and the real host `session_id`. Git subdirectories resolve to the worktree root; workspace aliases canonicalize, but task storage symlinks are rejected. Document scope is checked against the call: copying/moving a document to another canonical root is not an automatic transfer; preserve it and request explicit relocation support. Different clones/worktrees/sessions are independent. No shared current-session pointer, implicit inheritance or cross-session transfer exists.
 
 | Tool | Main fields |
 |---|---|
-| task_create | workspace, request_id, title, done_when; optional description, priority, dependencies, actor |
-| task_list | workspace; optional status (`open` default / `all` / specific state), priority, limit, cursor; returns exact filtered summary |
-| task_get | workspace, task_id; optional event_limit, event_cursor |
-| task_update | workspace, task_id, expected_revision, actor; metadata OR action, with action-specific reason/evidence |
+| task_create | workspace, session_id, request_id, title, done_when; optional description, priority, dependencies, actor |
+| task_list | workspace, session_id; optional status (`open` / `all` / specific), priority, limit, cursor |
+| task_get | workspace, session_id, task_id; optional event_limit, event_cursor |
+| task_update | workspace, session_id, task_id, expected_revision, actor; metadata OR action, reason/evidence |
 
-Successful `task_create` and `task_update` responses include a post-commit `workspace_overview`: exact unfinished counts plus at most five sanitized unfinished task titles. It may reflect a newer concurrent commit, which is safe for presentation. Older servers omit this field; callers then use `task_list(status="open")`. A failed mutation never includes the overview.
+Tasks have immutable `task_number` (`#N`) plus UUID `id`. Numbers increase globally across this machine's sessions/workspaces, up to signed 64-bit maximum; harmless gaps after failed creation are allowed. Separate machines/namespaces can have the same numbers. `task_get/update` accept #N or UUID; dependencies require UUIDs in this same scope. No deletion tool exists.
 
-Task and event pages default to 20 records, maximum 100. Follow `next_cursor` / `next_event_cursor`; a cursor is bound to its workspace, task/filter query. `task_list.summary.matching_total` and `summary.by_status` apply the workspace/status/priority filters before pagination, so they do not shrink on later pages. Pagination remains a live view, not a snapshot across multiple calls. Events are newest first. Timestamps are UTC in `YYYYMMDD_hhmmss` format.
+`request_id` is unique within workspace/session. Retry the SAME key and original content after a lost creation response; it returns the existing task at its current revision. Reusing it for different content is an error. Every update requires `expected_revision`; on conflict read again and decide, never silently overwrite. Actor/owner is attribution, not authorization.
 
-An example creation request (replace the workspace with your real project root):
+States are `pending`, `in_progress`, `blocked`, `completed`, `cancelled`. Actions are `start`, `block`, `release`, `complete`, `cancel`, `reopen`. Start/complete need completed prerequisites; complete needs evidence. Block/release/cancel/reopen need a reason. Blocked work resumes by release then start. Dependencies and `done_when` can change only while pending; terminal tasks must reopen for edits. A completed prerequisite cannot reopen under an active, blocked or completed dependent.
 
-```json
-{
-  "workspace": "/absolute/project/root",
-  "request_id": "unique-creation-request",
-  "title": "Implement the approved feature",
-  "done_when": "Acceptance checks pass and required review is recorded"
-}
+Pages default to 20, maximum 100. Counts in `summary` describe the complete filtered result, not page length. Cursors bind workspace AND session and query/task. Events are newest first. Listing uses creation timestamp then UUID; overview instead prioritizes active/blocked work and Ready before Waiting, then priority. Timestamps use UTC `YYYYMMDD_hhmmss`.
+
+Successful mutations include the current session's bounded `workspace_overview` (compatibility field name retained). A view failure includes a warning but does not turn a committed task into a failed mutation. Rejected operations do not change task revisions or events. Errors include `revision_conflict`, `idempotency_conflict`, `dependencies_unfinished`, `active_dependents`, `storage_uninitialized`, `migration_in_progress`, `migration_conflict`, `unsupported_schema`, `storage_error`, and `database_busy` (a cooperative lock timeout).
+
+## Research notes and editing
+
+`description` holds complete Markdown notes: problem, investigated cause and evidence, suggested fix/steps, unknowns, next action and references. Read `task_get` before replacing it via metadata; preserve earlier material. Resume requires checking whether the saved evidence still matches reality.
+
+The canonical file uses versioned JSON metadata fences, length-framed raw Markdown notes and collapsible full event history. See [format specification](docs/20261007_001507_markdown-format.md). Metadata is authoritative; display headings are generated. Arbitrary editor changes to notes/metadata are detected and rejected rather than silently accepted without revision/history. Use MCP for writes. This integrity check is cooperative error detection, NOT protection against someone rewriting content and digests deliberately.
+
+Writers coordinate via stable locks and atomic same-directory replacements with fsync. Uncooperative editors writing concurrently can still overwrite a tool after its final check; do not promise losslessness outside the shared locking protocol. Back up the canonical session files AND global ledger/activation/cutover records with writers stopped. History makes files grow, and Markdown is not assumed faster than SQLite.
+
+To repair generated views without changing tasks or revisions:
+
+```sh
+<runtime-python> -m task_management.store \
+  --workspace /absolute/worktree/root --session-id REAL_HOST_SESSION_ID
 ```
 
-Keep `request_id` and the creation payload for retries. Repeating them returns the same task, at its current revision. Reusing a key for different content fails. Different keys may intentionally create tasks with the same title.
+## Reminders and host UI
 
-States: `pending`, `in_progress`, `blocked`, `completed`, `cancelled`. Actions: `start`, `block`, `release`, `complete`, `cancel`, `reopen`. Start requires completed prerequisites; complete additionally requires nonblank evidence. Block/release/cancel/reopen require a reason. Blocked work continues via release then start. Dependencies and `done_when` are editable only while pending. Terminal tasks must reopen before any edits. Reopening a completed prerequisite is refused while a dependent is in progress, blocked or completed.
+Default `lifecycle` mode redraws on SessionStart and successful create/update, not every assistant turn. Completed/cancelled tasks are hidden; Ready/Waiting grouping is retained. Idempotent retries, errors and unrelated tools do not redraw. Closing the final task emits `Tasks · 0 unfinished`. Opt-in `install_runtime.py --reminder-mode always` adds a Stop reminder, but is noisier.
 
-Owner is attribution, not access control. Starting a task atomically prevents duplicate starts; it cannot prevent a caller from working outside the tool. A stopped session's task stays in progress until someone checks it and explicitly releases it with a reason. A revision conflict means re-read before deciding, not silently retry with a newer revision.
+SessionStart always provides bounded scope/path/query context even for empty or unavailable storage. PreToolUse checks mutation input against the host's workspace/session BEFORE writing; PostToolUse requires matching hook/input/result scope. These hooks are cooperative error prevention, not identity/authentication, and apply only where the host runs trusted hooks. See [official hook fields and behavior](https://learn.chatgpt.com/docs/hooks).
 
-Errors set MCP `isError` and domain errors include structured `error.code`, `message`, and `details`. Examples: `revision_conflict`, `dependencies_unfinished`, `active_dependents`, `dependency_cycle`, `not_found`, `idempotency_conflict`, `unsupported_schema`, `database_busy`. SDK argument validation errors are returned as MCP error text. Rejected operations do not increment revision or add events.
-
-## Storage and updates
-
-Default database: `~/.local/share/task-management/tasks.sqlite3`. `TASK_MANAGEMENT_DB` may select a different absolute path when launching the server (used by tests). No network service or background scheduler is started. Database storage is local; returned task text enters the Codex conversation.
-
-The database is outside both the source checkout and plugin cache. Uninstall/reinstall does not remove it. New databases use schema 2. On first open, schema 1 upgrades atomically after creating a private SQLite backup beside the database named `<database>.schema1.<UTC timestamp>.<unique suffix>.sqlite3`. The writer lock covers both backup and migration, so no acknowledged write can slip between them. Backup failure aborts the upgrade. Unknown versions and nonempty unversioned databases are rejected without reset; every operation checks the schema version.
-
-Existing tasks receive numbers in creation-event order, including completed/cancelled tasks. The migration does not change UUIDs, revisions, task fields, dependencies or historical event JSON. Old historical snapshots intentionally have no `task_number`; current snapshots and new events do. Missing creation events abort migration instead of inventing an order. No automatic downgrade is provided. Old server processes reject schema 2 with `unsupported_schema`; reconnect using the updated plugin/new thread, rather than resetting the database. Keep the backup, and do not restore over newer work without accounting for every post-upgrade change.
-
-Use a local disk, not a network-share SQLite WAL database. For routine backups, use SQLite's backup API, or shut down all writers and checkpoint before a filesystem backup; copying just the DB while WAL writers are running is insufficient.
-
-To update: run `install_runtime.py` if dependencies changed, use plugin-creator's cachebuster helper, reinstall `task-management@personal`, then open a new thread. Runtime environments are keyed by lock contents and Python major/minor version, so updating dependencies does not replace the environment used by an existing server. MCP startup never downloads packages.
-
-No permanent-delete tool, parent/child hierarchy, native pinned TODO panel, automatic scheduling, or cross-machine sync is provided. Task reminders are Codex warning messages plus a bounded assistant-response fallback, not custom host chrome. Completion evidence is a caller's record; the tool does not certify tests, commits, or human acceptance.
+CLI can display warning-style hook output. If desktop UI does not render `systemMessage`, the skill ends successful mutation replies with a compact overview instead. Neither gets a pinned native TODO panel. Filesystem-local tools require a local runtime/workspace; do not assume ordinary cloud/web chats can read these files.
 
 ## Verify
-
-Run with the interpreter printed by `install_runtime.py`, from this source directory:
 
 ```sh
 <runtime-python> -m unittest discover -s tests -v
 ```
 
-Tests use temporary databases/workspaces, real subprocesses, competing SQLite writers, a killed uncommitted writer, actual Git worktrees, and real MCP stdio clients in both legacy and automatic negotiation modes. The acceptance record additionally documents new-thread discovery and calls through the actual Codex app-server, without submitting a model turn.
+Tests use temporary workspaces/data, actual multiprocessing/terminated writers, Git worktrees, real MCP stdio in legacy/auto negotiation and real hook subprocesses. SQLite is retained only for regression fixtures and explicit export/cutover. Acceptance records distinguish source tests, real host checks and any installation/data switch not yet performed.

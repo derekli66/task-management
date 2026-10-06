@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from task_management.store import TaskError, TaskStore, encode_cursor
+from task_management.legacy_store import TaskError, TaskStore, encode_cursor
 
 
 def create_v1(path, workspace):

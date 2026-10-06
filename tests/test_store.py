@@ -5,7 +5,7 @@ import tempfile
 import unittest
 import uuid
 
-from task_management.store import TaskError, TaskStore
+from task_management.legacy_store import TaskError, TaskStore
 
 
 class StoreTest(unittest.TestCase):

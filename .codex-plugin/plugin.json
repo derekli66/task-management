@@ -1,7 +1,7 @@
 {
   "name": "task-management",
-  "version": "0.1.0+codex.20260920160440",
-  "description": "Persistent workspace-scoped local tasks with SQLite and four MCP tools",
+  "version": "0.2.0+codex.20261007010000",
+  "description": "Session-scoped Markdown TODOs with research notes and four local MCP tools",
   "author": {
     "name": "Derek"
   },
@@ -9,11 +9,11 @@
   "interface": {
     "displayName": "Task Management",
     "shortDescription": "Manage persistent local project tasks.",
-    "longDescription": "Create, list, inspect and update workspace-scoped tasks with dependency checks, revision conflicts and durable history.",
+    "longDescription": "Create, list, inspect and update session-scoped Markdown tasks with research notes, dependency checks, revision conflicts and durable history.",
     "developerName": "Derek",
     "category": "Productivity",
     "capabilities": [],
-    "defaultPrompt": "List the unfinished tasks for this workspace."
+    "defaultPrompt": "List the unfinished tasks for this workspace and current Codex session."
   },
   "mcpServers": "./.mcp.json"
 }

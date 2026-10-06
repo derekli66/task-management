@@ -11,6 +11,7 @@ import venv
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from task_management.config import read_reminder_mode, settings_path, write_reminder_mode
+from task_management.locking import atomic_write
 
 
 def parse_arguments(arguments=None):
@@ -50,11 +51,12 @@ def main(arguments=None):
         "command": str(python),
         "args": ["./task_management/server.py"],
         "cwd": ".",
-        "env_vars": ["TASK_MANAGEMENT_DB"],
+        "env_vars": ["TASK_MANAGEMENT_DATA"],
     }}}
-    (ROOT / ".mcp.json").write_text(json.dumps(config, indent=2) + "\n")
+    atomic_write(ROOT / ".mcp.json", json.dumps(config, indent=2) + "\n")
     configure_reminder(options.reminder_mode)
     print(python)
+    print("Storage initialization/cutover is explicit; see README.md.",file=sys.stderr)
 
 
 if __name__ == "__main__":

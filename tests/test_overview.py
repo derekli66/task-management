@@ -5,14 +5,14 @@ import subprocess
 import tempfile
 import unittest
 
-from task_management.overview import (
+from task_management.legacy_overview import (
     OverviewUnavailable,
     read_safe_overview,
     read_overview,
     render_overview,
     resolve_workspace,
 )
-from task_management.store import TaskStore
+from task_management.legacy_store import TaskStore
 
 
 class OverviewTest(unittest.TestCase):

@@ -1,124 +1,57 @@
-"""Side-effect-free workspace task overview for lifecycle presentation."""
-from pathlib import Path
+"""Read-only Markdown task summaries; no legacy database access."""
 import re
-import sqlite3
-import subprocess
 import unicodedata
-
+from task_management.config import canonical_workspace
+from task_management.rules import TaskError
+from task_management.store import TaskStore
 
 OPEN_STATUSES = ("pending", "in_progress", "blocked")
-ANSI_ESCAPE = re.compile(
-    r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[@-Z\\-_])"
-)
+ANSI_ESCAPE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[@-Z\\-_])")
 
 
 class OverviewUnavailable(Exception):
-    """The reminder cannot safely read the current workspace state."""
+    """The reminder cannot safely read the current session."""
 
 
-def resolve_workspace(cwd: str | Path) -> Path:
-    """Resolve a Git worktree root, falling back to the canonical directory."""
+def resolve_workspace(cwd):
     try:
-        directory = Path(cwd).resolve(strict=True)
-        if not directory.is_dir():
-            raise ValueError()
-    except (OSError, RuntimeError, TypeError, ValueError) as exc:
-        raise OverviewUnavailable("cwd is not an existing directory") from exc
-
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(directory), "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, timeout=0.5, check=False,
-        )
-        if result.returncode == 0:
-            root = Path(result.stdout.strip()).resolve(strict=True)
-            if root.is_dir():
-                return root
-    except (OSError, subprocess.SubprocessError, RuntimeError):
-        pass
-    return directory
+        return canonical_workspace(cwd)
+    except (TaskError, OSError, ValueError, TypeError) as exc:
+        raise OverviewUnavailable(str(exc)) from exc
 
 
-def _readonly_connection(db_path: str | Path, timeout: float) -> sqlite3.Connection:
-    try:
-        path = Path(db_path)
-        if not path.is_absolute():
-            raise ValueError("database path is not absolute")
-        resolved = path.resolve(strict=True)
-        connection = sqlite3.connect(
-            f"{resolved.as_uri()}?mode=ro", uri=True, timeout=timeout,
-            isolation_level=None,
-        )
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA query_only=ON")
-        return connection
-    except (OSError, ValueError, sqlite3.Error) as exc:
-        raise OverviewUnavailable("task database is unavailable") from exc
+def overview_from_document(document, *, limit=5):
+    tasks = {t["id"]: t for t in document["tasks"]}
+    def ready(task):
+        return all(tasks[d]["status"] == "completed" for d in task["dependencies"])
+    opened = [t for t in tasks.values() if t["status"] in OPEN_STATUSES]
+    opened.sort(key=lambda t: (
+        {"in_progress":0, "blocked":1, "pending":2}[t["status"]],
+        not ready(t) if t["status"] == "pending" else False,
+        {"high":0, "normal":1, "low":2}[t["priority"]],
+        t["created_at"], t["id"]))
+    page = opened if limit is None else opened[:limit]
+    return dict(matching_total=len(opened),
+        by_status={s:sum(t["status"]==s for t in opened) for s in OPEN_STATUSES},
+        tasks=[dict(task_number=t["task_number"], title=t["title"],
+                    status=t["status"], ready=ready(t)) for t in page],
+        remaining=len(opened)-len(page))
 
 
-def read_overview(db_path: str | Path, workspace: str | Path, *, limit: int = 5,
-                  timeout: float = 0.1) -> dict:
-    """Read a bounded schema-2 snapshot without creating or migrating storage."""
+def read_overview(data_path, workspace, *, session_id, limit=5, timeout=0.1):
     if type(limit) is not int or not 1 <= limit <= 5:
         raise ValueError("limit must be an integer from 1 to 5")
     try:
-        workspace_key = str(Path(workspace).resolve(strict=True))
-        if not Path(workspace_key).is_dir():
-            raise ValueError()
-    except (OSError, RuntimeError, TypeError, ValueError) as exc:
-        raise OverviewUnavailable("workspace is unavailable") from exc
+        _, _, document = TaskStore(data_path, timeout)._read(workspace, session_id)
+        return overview_from_document(document, limit=limit)
+    except (TaskError, OSError, ValueError, TypeError) as exc:
+        raise OverviewUnavailable(str(exc)) from exc
 
-    connection = _readonly_connection(db_path, timeout)
-    try:
-        connection.execute("BEGIN")
-        if connection.execute("PRAGMA user_version").fetchone()[0] != 2:
-            raise OverviewUnavailable("task database schema is unsupported")
-        counts = {status: 0 for status in OPEN_STATUSES}
-        rows = connection.execute(
-            """SELECT status, count(*) AS count FROM tasks
-               WHERE workspace=? AND status IN ('pending','in_progress','blocked')
-               GROUP BY status""", (workspace_key,)).fetchall()
-        for row in rows:
-            counts[row["status"]] = row["count"]
-        total = sum(counts.values())
-        tasks = connection.execute(
-            """SELECT n.number, t.title, t.status, t.priority,
-               CASE WHEN NOT EXISTS (
-                   SELECT 1 FROM dependencies d JOIN tasks prerequisite
-                   ON prerequisite.workspace=d.workspace AND prerequisite.id=d.depends_on
-                   WHERE d.workspace=t.workspace AND d.task_id=t.id
-                   AND prerequisite.status!='completed'
-               ) THEN 1 ELSE 0 END AS ready
-               FROM tasks t JOIN task_numbers n ON n.task_id=t.id
-               WHERE t.workspace=? AND t.status IN ('pending','in_progress','blocked')
-               ORDER BY
-                   CASE t.status WHEN 'in_progress' THEN 0 WHEN 'blocked' THEN 1 ELSE 2 END,
-                   CASE WHEN t.status='pending' AND EXISTS (
-                       SELECT 1 FROM dependencies d JOIN tasks prerequisite
-                       ON prerequisite.workspace=d.workspace AND prerequisite.id=d.depends_on
-                       WHERE d.workspace=t.workspace AND d.task_id=t.id
-                       AND prerequisite.status!='completed'
-                   ) THEN 1 ELSE 0 END,
-                   CASE t.priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
-                   t.created_at, t.id
-               LIMIT ?""", (workspace_key, limit)).fetchall()
-        return {
-            "matching_total": total,
-            "by_status": counts,
-            "tasks": [{
-                "task_number": f"#{row['number']}",
-                "title": row["title"],
-                "status": row["status"],
-                "ready": bool(row["ready"]),
-            } for row in tasks],
-            "remaining": max(0, total - len(tasks)),
-        }
-    except OverviewUnavailable:
-        raise
-    except sqlite3.Error as exc:
-        raise OverviewUnavailable("task database could not be read") from exc
-    finally:
-        connection.close()
+
+def read_safe_overview(data_path, workspace, *, session_id, limit=5, title_limit=100, timeout=0.1):
+    overview = read_overview(data_path, workspace, session_id=session_id, limit=limit, timeout=timeout)
+    overview["tasks"] = [{**t, "title":sanitize_title(t["title"], limit=title_limit)} for t in overview["tasks"]]
+    return overview
 
 
 def sanitize_title(value: object, *, limit: int = 100) -> str:
@@ -129,17 +62,6 @@ def sanitize_title(value: object, *, limit: int = 100) -> str:
                    for char in text)
     text = " ".join(text.split()) or "Untitled"
     return text if len(text) <= limit else text[:max(1, limit - 1)].rstrip() + "…"
-
-
-def read_safe_overview(db_path: str | Path, workspace: str | Path, *, limit: int = 5,
-                       title_limit: int = 100, timeout: float = 0.1) -> dict:
-    """Return a bounded post-commit snapshot safe to include in a tool response."""
-    overview = read_overview(db_path, workspace, limit=limit, timeout=timeout)
-    overview["tasks"] = [
-        {**task, "title": sanitize_title(task.get("title"), limit=title_limit)}
-        for task in overview["tasks"]
-    ]
-    return overview
 
 
 def render_overview(overview: dict, *, include_empty: bool = False, title_limit: int = 100,

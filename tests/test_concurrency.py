@@ -6,7 +6,7 @@ import tempfile
 import time
 import unittest
 
-from task_management.store import TaskError, TaskStore
+from task_management.legacy_store import TaskError, TaskStore
 
 
 def compete(db_path, workspace, gate, results, operation, task=None):
