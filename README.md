@@ -117,6 +117,10 @@ Pages default to 20, maximum 100. Counts in `summary` describe the complete filt
 
 Successful mutations include the current session's bounded `workspace_overview` (compatibility field name retained). A view failure includes a warning but does not turn a committed task into a failed mutation. Rejected operations do not change task revisions or events. Errors include `revision_conflict`, `idempotency_conflict`, `dependencies_unfinished`, `active_dependents`, `storage_uninitialized`, `migration_in_progress`, `migration_conflict`, `unsupported_schema`, `storage_error`, and `database_busy` (a cooperative lock timeout).
 
+Successful create/update responses also include `display_summary`, a ready-to-render Markdown string of at most 2,200 characters. It confirms the affected task's number, literal title and actual status, then exact unfinished/pending/in_progress/blocked counts and up to five open tasks in the overview's Ready/Waiting order. Each row has an explicit status; `… +N more` accounts for undisplayed open tasks. Only presentation titles are sanitized, bounded to 100 characters and Markdown-escaped; stored research notes and titles are unchanged.
+
+The existing JSON text block and structured result remain identical objects; the new field is additive, not a replacement for either. Read/error results do not receive success summaries. Idempotent create reuse describes the existing task. A post-commit overview failure yields an explicit unavailable summary, not zero. A formatter failure preserves committed success and existing warnings, omits `display_summary` and adds a fixed presentation warning; it is not a reason to repeat the mutation.
+
 ## Research notes and editing
 
 `description` holds complete Markdown notes: problem, investigated cause and evidence, suggested fix/steps, unknowns, next action and references. Read `task_get` before replacing it via metadata; preserve earlier material. Resume requires checking whether the saved evidence still matches reality.
@@ -134,11 +138,15 @@ To repair generated views without changing tasks or revisions:
 
 ## Reminders and host UI
 
-Default `lifecycle` mode redraws on SessionStart and successful create/update, not every assistant turn. Completed/cancelled tasks are hidden; Ready/Waiting grouping is retained. Idempotent retries, errors and unrelated tools do not redraw. Closing the final task emits `Tasks · 0 unfinished`. Opt-in `install_runtime.py --reminder-mode always` adds a Stop reminder, but is noisier.
+Default `lifecycle` mode redraws on SessionStart and successful create/update, not every assistant turn. Completed/cancelled tasks are hidden from the unfinished list, but the assistant still confirms a just-completed/cancelled task's number, title and status. Ready/Waiting grouping is retained. Idempotent retries, errors and unrelated tools do not redraw the hook. Closing the final task emits `Tasks · 0 unfinished`. Opt-in `install_runtime.py --reminder-mode always` adds a Stop reminder, but is noisier.
 
 SessionStart always provides bounded scope/path/query context even for empty or unavailable storage. PreToolUse checks mutation input against the host's workspace/session BEFORE writing; PostToolUse requires matching hook/input/result scope. These hooks are cooperative error prevention, not identity/authentication, and apply only where the host runs trusted hooks. See [official hook fields and behavior](https://learn.chatgpt.com/docs/hooks).
 
-CLI can display warning-style hook output. If desktop UI does not render `systemMessage`, the skill ends successful mutation replies with a compact overview instead. Neither gets a pinned native TODO panel. Filesystem-local tools require a local runtime/workspace; do not assume ordinary cloud/web chats can read these files.
+CLI can display warning-style hook output. Historical desktop acceptance found that `systemMessage` was not reliably visible; this is not a fresh test of the current App version. The tool/skill contract therefore requires a visible assistant reply containing number + literal title + actual status and an unfinished summary regardless of hook visibility, not a task number alone.
+
+For a single mutation, render `display_summary`. For several in one turn, confirm each distinct affected task once at its final observed status and append only the final successful mutation's session-summary section. This avoids repeated summaries and extra list calls. If the field is absent, use `task` plus `workspace_overview`; only if the overview is unavailable, use one `task_list(status="open", limit=5)` call. That fallback reports exact counts and a labeled page, not a globally priority-ordered selection. A failed fallback read reports unavailable, never zero. Unrelated turns do not require summaries.
+
+Neither approach creates a pinned native TODO panel or guarantees that the App/model follows the presentation contract. Source tests validate formatting and tool delivery; opt-in real-host tests validate transport without a model turn. Visible App acceptance is separate and remains pending until authorized installation/reload and observed create/update/terminal/batch replies. Filesystem-local tools require a local runtime/workspace; do not assume ordinary cloud/web chats can read these files.
 
 ## Verify
 

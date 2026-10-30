@@ -77,12 +77,19 @@ class CodexHostTest(unittest.TestCase):
                     self.assertFalse(result.get("isError"),str(result))
                     return result.get("structuredContent") or json.loads(result["content"][0]["text"])
                 notes = "## 研究\ncache key 缺少 user ID\n## 解法\n新增 key 與回歸測試\n## 下一步\n先覆核離線模式\n"
-                task = call(sessions[0],"task_create",request_id="real-request",title="Investigate",done_when="Tests pass",description=notes)["task"]
+                created = call(sessions[0],"task_create",request_id="real-request",title="Investigate",done_when="Tests pass",description=notes)
+                task = created["task"]
+                self.assertIn(f"{task['task_number']} Investigate — pending", created["display_summary"])
+                self.assertIn("Tasks · 1 unfinished", created["display_summary"])
                 self.assertEqual(call(sessions[1],"task_list")["summary"]["matching_total"],0)
                 self.assertEqual(call(sessions[0],"task_get",task_id=task["task_number"])["task"]["description"],notes)
-                updated = call(sessions[0],"task_update",task_id=task["id"],expected_revision=1,actor="verification",
-                               metadata={"description":notes+"## 證據\nObserved in source\n"})["task"]
+                mutation = call(sessions[0],"task_update",task_id=task["id"],expected_revision=1,actor="verification",
+                                metadata={"description":notes+"## 證據\nObserved in source\n"})
+                updated = mutation["task"]
                 self.assertEqual(updated["revision"],2)
+                self.assertIn(f"{task['task_number']} Investigate — pending", mutation["display_summary"])
+                self.assertIn("pending 1", mutation["display_summary"])
+                self.assertEqual(call(sessions[1],"task_list")["summary"]["matching_total"],0)
                 print("REAL_CODEX_HOST_SESSION_ISOLATION_OK",flush=True)
             finally:
                 host.close()

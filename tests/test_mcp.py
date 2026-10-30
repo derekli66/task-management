@@ -34,10 +34,24 @@ class MCPTest(unittest.TestCase):
                 listing = await client.list_tools()
                 self.assertEqual({t.name for t in listing.tools},
                     {"task_create", "task_list", "task_get", "task_update"})
+                for tool in listing.tools:
+                    if tool.name in ("task_create", "task_update"):
+                        for required in ("task_number", "title", "status", "summary", "visible"):
+                            self.assertIn(required, tool.description)
                 async def call(name, **args):
                     result = await client.call_tool(name, {"workspace": workspace, "session_id":"thread-test", **args})
                     self.assertFalse(result.is_error, str(result))
                     self.assertEqual(json.loads(result.content[0].text), result.structured_content)
+                    if name in ("task_create", "task_update"):
+                        payload = result.structured_content
+                        summary = payload["display_summary"]
+                        confirmation = summary.split("\n\n", 1)[0]
+                        task = payload["task"]
+                        self.assertIn(f"{task['task_number']} {task['title']} — {task['status']}", confirmation)
+                        self.assertIn(f"Tasks · {payload['workspace_overview']['matching_total']} unfinished", summary)
+                        self.assertLessEqual(len(summary), 2200)
+                    else:
+                        self.assertNotIn("display_summary", result.structured_content)
                     return result.structured_content
                 created = await call("task_create", request_id="retry-key", title="測試", done_when="All checks pass")
                 task = created["task"]
@@ -52,6 +66,13 @@ class MCPTest(unittest.TestCase):
                 retry = await call("task_create", request_id="retry-key", title="測試", done_when="All checks pass")
                 self.assertTrue(retry["reused"])
                 self.assertEqual(retry["workspace_overview"]["matching_total"], 1)
+                edited = await call("task_update", task_id=task["id"], expected_revision=1,
+                                    actor="test", metadata={"title": "更新測試"})
+                task = edited["task"]
+                retry = await call("task_create", request_id="retry-key", title="測試", done_when="All checks pass")
+                self.assertTrue(retry["reused"])
+                self.assertEqual(retry["task"], task)
+                self.assertNotIn("created", retry["display_summary"].lower())
                 result = await client.call_tool("task_get", {"workspace":str(other), "session_id":"thread-test", "task_id":task["id"]})
                 self.assertTrue(result.is_error)
                 self.assertEqual(result.structured_content["error"]["code"], "not_found")
@@ -75,11 +96,44 @@ class MCPTest(unittest.TestCase):
                     "task_id":task["id"], "expected_revision":1, "actor":"test", "action":"reopen", "reason":"Old"})
                 self.assertTrue(result.is_error)
                 self.assertEqual(result.structured_content["error"]["code"], "revision_conflict")
+                self.assertNotIn("display_summary", result.structured_content)
             async with Client(params, mode=mode) as fresh:
                 result = await fresh.call_tool("task_get", {"workspace":workspace, "session_id":"thread-test", "task_id":task["task_number"]})
                 self.assertFalse(result.is_error)
                 self.assertEqual(result.structured_content["task"], task)
-                self.assertEqual(len(result.structured_content["events"]), 8)
+                self.assertEqual(len(result.structured_content["events"]), 9)
+
+    def test_stdio_summary_retains_affected_task_outside_top_five(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as cwd:
+                root = Path(cwd).resolve()
+                Numbering(root / "data").initialize()
+                params = StdioServerParameters(command=sys.executable,
+                    args=[str(ROOT / "task_management/server.py")], cwd=cwd,
+                    env={**os.environ, "TASK_MANAGEMENT_DATA": str(root / "data")})
+                async with Client(params) as client:
+                    scope = dict(workspace=str(root), session_id="summary-test")
+                    for i in range(7):
+                        result = await client.call_tool("task_create", dict(scope,
+                            request_id=str(i), title=f"Task {i}", done_when="Verified",
+                            priority="low" if i == 6 else "normal"))
+                        self.assertFalse(result.is_error)
+                    task = result.structured_content["task"]
+                    result = await client.call_tool("task_update", dict(scope, task_id=task["id"],
+                        expected_revision=1, actor="test", metadata={"title":"Deferred fix"}))
+                    payload = result.structured_content
+                    self.assertFalse(result.is_error)
+                    self.assertEqual(json.loads(result.content[0].text), payload)
+                    self.assertEqual(payload["workspace_overview"]["matching_total"], 7)
+                    self.assertEqual(payload["workspace_overview"]["remaining"], 2)
+                    self.assertNotIn(task["task_number"],
+                        [t["task_number"] for t in payload["workspace_overview"]["tasks"]])
+                    confirmation, session = payload["display_summary"].split("\n\n", 1)
+                    self.assertIn("#7 Deferred fix — pending", confirmation)
+                    self.assertIn("pending 7", session)
+                    self.assertIn("… +2 more", session)
+                    self.assertNotIn("#7 ", session)
+        asyncio.run(asyncio.wait_for(scenario(), timeout=20))
 
     def test_invalid_tool_arguments_cannot_change_state(self):
         async def scenario():

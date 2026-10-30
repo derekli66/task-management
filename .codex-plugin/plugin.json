@@ -1,6 +1,6 @@
 {
   "name": "task-management",
-  "version": "0.2.0+codex.20261007010000",
+  "version": "0.2.0+codex.20261030195500",
   "description": "Session-scoped Markdown TODOs with research notes and four local MCP tools",
   "author": {
     "name": "Derek"
